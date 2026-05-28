@@ -1,6 +1,6 @@
 {
   "qmt": {
-    "qmt_path": "",
+    "qmt_path": "D:\\兴业证券SMT-Q-2.0.8.0-test\\userdata_mini",
     "poll_interval_ms": 500,
     "enable_mock_when_xtquant_missing": false,
     "auto_atm": true,

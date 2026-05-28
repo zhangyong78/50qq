@@ -204,7 +204,7 @@ def default_contract_pools() -> list[dict[str, Any]]:
 def default_app_config() -> dict[str, Any]:
     return {
         "qmt": {
-            "qmt_path": "",
+            "qmt_path": r"D:\兴业证券SMT-Q-2.0.8.0-test\userdata_mini",
             "poll_interval_ms": 500,
             "enable_mock_when_xtquant_missing": False,
             "auto_atm": True,
@@ -766,7 +766,9 @@ def resolve_qmt_path_for_connect(qmt_path: str) -> str:
     """连接行情时解析 QMT 路径：配置优先，否则自动发现大 QMT userdata。"""
     raw = str(qmt_path or "").strip()
     if raw:
-        return resolve_qmt_path_for_options(raw) or raw
+        # Respect an explicit user-provided path verbatim. This matters for
+        # environments where only userdata_mini has a live quote service.
+        return raw
     for candidate in discover_qmt_userdata_paths(prefer_mini=False):
         if not is_mini_qmt_path(candidate):
             return candidate
@@ -2008,6 +2010,7 @@ class QuoteWorker(QThread):
     rows_ready = pyqtSignal(list)
     status_ready = pyqtSignal(str, bool)
     market_ready = pyqtSignal(dict)
+    diagnostic_ready = pyqtSignal(dict)
 
     def __init__(self, config_path: Path) -> None:
         super().__init__()
@@ -2034,6 +2037,21 @@ class QuoteWorker(QThread):
 
     def _emit_connecting(self) -> None:
         self.status_ready.emit("正在连接 QMT...", False)
+
+    def _emit_diagnostic(self, qmt_path: str, connect_note: str = "", qmt_error: str = "") -> None:
+        resolved_qmt_path = resolve_qmt_path_for_connect(qmt_path)
+        data_dir = qmt_data_dir_from_path(resolved_qmt_path)
+        self.diagnostic_ready.emit(
+            {
+                "config_path": str(self.config_path),
+                "configured_qmt_path": qmt_path,
+                "resolved_qmt_path": resolved_qmt_path,
+                "data_dir": str(data_dir) if data_dir else "",
+                "candidate_ports": ordered_qmt_market_ports(resolved_qmt_path),
+                "connect_note": connect_note,
+                "qmt_error": qmt_error,
+            }
+        )
 
     def _emit_qmt_failure(
         self,
@@ -2082,6 +2100,8 @@ class QuoteWorker(QThread):
             fees = FeeConfig.from_dict(config["fees"])
             self.set_sound_enabled(fees.sound_enabled)
             qmt_config = config.get("qmt", {})
+            qmt_path = str(qmt_config.get("qmt_path", "")).strip()
+            self._emit_diagnostic(qmt_path)
             auto_atm = bool(qmt_config.get("auto_atm", True))
             enable_mock = bool(qmt_config.get("enable_mock_when_xtquant_missing", False))
             interval_sec = max(0.05, int(qmt_config.get("poll_interval_ms", 500)) / 1000)
@@ -2117,6 +2137,7 @@ class QuoteWorker(QThread):
                     source, use_mock, connect_note, qmt_error = self._try_connect_quote_source(
                         config, subscribed_codes, pairs, templates, enable_mock
                     )
+                    self._emit_diagnostic(qmt_path, connect_note, qmt_error)
 
                 if need_atm_refresh:
                     spot_templates = [
@@ -2132,6 +2153,7 @@ class QuoteWorker(QThread):
                             templates,
                             enable_mock,
                         )
+                        self._emit_diagnostic(qmt_path, connect_note, qmt_error)
                         if source is not None:
                             subscribed_codes = initial_codes
 
@@ -2172,6 +2194,7 @@ class QuoteWorker(QThread):
                                 templates,
                                 enable_mock,
                             )
+                            self._emit_diagnostic(qmt_path, connect_note, qmt_error)
                         time.sleep(interval_sec)
                         continue
                     new_codes = collect_subscription_codes(templates, new_pairs)
@@ -2179,6 +2202,7 @@ class QuoteWorker(QThread):
                         source, use_mock, connect_note, qmt_error = self._try_connect_quote_source(
                             config, new_codes, new_pairs, templates, enable_mock
                         )
+                        self._emit_diagnostic(qmt_path, connect_note, qmt_error)
                         subscribed_codes = new_codes
                     pairs = new_pairs
                     last_atm_refresh = now
@@ -2193,6 +2217,7 @@ class QuoteWorker(QThread):
                         templates,
                         enable_mock,
                     )
+                    self._emit_diagnostic(qmt_path, connect_note, qmt_error)
                     time.sleep(interval_sec)
                     continue
 
@@ -2226,6 +2251,7 @@ class QuoteWorker(QThread):
                     ticks = source.fetch()
                 except Exception as exc:
                     qmt_error = str(exc)
+                    self._emit_diagnostic(qmt_path, connect_note, qmt_error)
                     display_pairs = pairs if pairs else pairs_from_templates(templates)
                     self._emit_qmt_failure(
                         templates,
@@ -2758,6 +2784,14 @@ class MainWindow(QMainWindow):
         )
         layout.addWidget(self.error_banner)
 
+        self.diagnostic_label = QLabel("诊断信息：等待初始化")
+        self.diagnostic_label.setWordWrap(True)
+        self.diagnostic_label.setStyleSheet(
+            "background:#f7f7f7; color:#333333; padding:4px 8px; border-radius:4px;"
+            "border:1px solid #d9d9d9; font-size:11px;"
+        )
+        layout.addWidget(self.diagnostic_label)
+
         contract_box = QGroupBox(self)
         contract_layout = QVBoxLayout(contract_box)
         contract_head = QHBoxLayout()
@@ -2910,6 +2944,7 @@ class MainWindow(QMainWindow):
         self.worker.rows_ready.connect(self.on_rows_ready)
         self.worker.status_ready.connect(self.on_status_ready)
         self.worker.market_ready.connect(self.on_market_ready)
+        self.worker.diagnostic_ready.connect(self.on_diagnostic_ready)
         self.worker.start()
 
     def _restart_worker(self) -> None:
@@ -3051,6 +3086,23 @@ class MainWindow(QMainWindow):
 
     def on_market_ready(self, status: dict[str, Any]) -> None:
         self._update_market_panel(status)
+
+    def on_diagnostic_ready(self, info: dict[str, Any]) -> None:
+        ports = ",".join(str(port) for port in info.get("candidate_ports", []))
+        lines = [
+            f"配置文件: {info.get('config_path', '')}",
+            f"配置QMT路径: {info.get('configured_qmt_path', '') or '-'}",
+            f"实际QMT路径: {info.get('resolved_qmt_path', '') or '-'}",
+            f"data_dir: {info.get('data_dir', '') or '-'}",
+            f"候选端口: {ports or '-'}",
+        ]
+        connect_note = str(info.get("connect_note") or "").strip()
+        qmt_error = str(info.get("qmt_error") or "").strip()
+        if connect_note:
+            lines.append(f"连接说明: {connect_note}")
+        if qmt_error:
+            lines.append(f"错误信息: {qmt_error}")
+        self.diagnostic_label.setText("\n".join(lines))
 
     def on_rows_ready(self, rows: list[dict[str, Any]]) -> None:
         self.latest_rows = rows

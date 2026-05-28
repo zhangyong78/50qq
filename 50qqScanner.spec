@@ -1,12 +1,15 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_all
+
+xtquant_datas, xtquant_binaries, xtquant_hiddenimports = collect_all("xtquant")
 
 a = Analysis(
     ['option_arbitrage_scanner.py'],
     pathex=[],
-    binaries=[],
-    datas=[('contracts_config.json', '.')],
-    hiddenimports=[],
+    binaries=xtquant_binaries,
+    datas=[('contracts_config.json', '.')] + xtquant_datas,
+    hiddenimports=xtquant_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

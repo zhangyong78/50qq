@@ -12,10 +12,7 @@ echo Building Windows GUI executable...
 pyinstaller ^
   --noconfirm ^
   --clean ^
-  --windowed ^
-  --name 50qqScanner ^
-  --add-data "contracts_config.json;." ^
-  option_arbitrage_scanner.py
+  50qqScanner.spec
 
 if errorlevel 1 (
     echo.
@@ -23,6 +20,8 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+
+copy /Y "contracts_config.json" "dist\50qqScanner\contracts_config.json" >nul
 
 echo.
 echo Build completed: dist\50qqScanner\50qqScanner.exe
