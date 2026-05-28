@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -2361,12 +2362,18 @@ class ConfigDialog(QDialog):
         "启用",
     ]
 
-    def __init__(self, config: dict[str, Any], parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        parent: QWidget | None = None,
+        diagnostic_text: str = "",
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("配置中心")
         self.resize(1120, 760)
         self._setup_ui()
         self.load_from_config(config)
+        self.set_diagnostic_text(diagnostic_text)
 
     def _setup_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -2470,6 +2477,24 @@ class ConfigDialog(QDialog):
         help_text.setWordWrap(True)
         layout.addWidget(help_text)
 
+        diagnostic_box = QGroupBox("连接诊断", self)
+        diagnostic_layout = QVBoxLayout(diagnostic_box)
+        diagnostic_hint = QLabel("首页只保留简洁状态，详细的 QMT 路径、data_dir、端口和错误信息放在这里查看。")
+        diagnostic_hint.setWordWrap(True)
+        diagnostic_layout.addWidget(diagnostic_hint)
+        self.diagnostic_text_edit = QTextEdit(diagnostic_box)
+        self.diagnostic_text_edit.setReadOnly(True)
+        self.diagnostic_text_edit.setMinimumHeight(120)
+        self.diagnostic_text_edit.setMaximumHeight(180)
+        diagnostic_layout.addWidget(self.diagnostic_text_edit)
+        diagnostic_actions = QHBoxLayout()
+        diagnostic_actions.addStretch(1)
+        self.copy_diagnostic_button = QPushButton("复制诊断", diagnostic_box)
+        self.copy_diagnostic_button.clicked.connect(self.copy_diagnostic_text)
+        diagnostic_actions.addWidget(self.copy_diagnostic_button)
+        diagnostic_layout.addLayout(diagnostic_actions)
+        layout.addWidget(diagnostic_box)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
@@ -2484,6 +2509,14 @@ class ConfigDialog(QDialog):
         spin.setDecimals(decimals)
         spin.setSingleStep(10 ** (-decimals) if decimals > 0 else 1)
         return spin
+
+    def set_diagnostic_text(self, text: str) -> None:
+        diagnostic = str(text or "").strip() or "暂无诊断信息"
+        self.diagnostic_text_edit.setPlainText(diagnostic)
+
+    def copy_diagnostic_text(self) -> None:
+        QApplication.clipboard().setText(self.diagnostic_text_edit.toPlainText())
+        QMessageBox.information(self, "已复制", "连接诊断信息已复制到剪贴板。")
 
     def load_from_config(self, config: dict[str, Any]) -> None:
         qmt = config.get("qmt", {})
@@ -2708,6 +2741,8 @@ class MainWindow(QMainWindow):
         self.fees = FeeConfig.from_dict(self.config["fees"])
         self.is_frozen = False
         self.latest_rows: list[dict[str, Any]] = []
+        self.latest_diagnostic_info: dict[str, Any] = {}
+        self.config_dialog: ConfigDialog | None = None
         self.rendered_rows_by_mode: dict[str, list[dict[str, Any]]] = {
             mode_key: [] for mode_key, _, _ in ARBITRAGE_MODE_DEFS
         }
@@ -2783,14 +2818,6 @@ class MainWindow(QMainWindow):
             "border:1px solid #ffcc80; font-size:11px;"
         )
         layout.addWidget(self.error_banner)
-
-        self.diagnostic_label = QLabel("诊断信息：等待初始化")
-        self.diagnostic_label.setWordWrap(True)
-        self.diagnostic_label.setStyleSheet(
-            "background:#f7f7f7; color:#333333; padding:4px 8px; border-radius:4px;"
-            "border:1px solid #d9d9d9; font-size:11px;"
-        )
-        layout.addWidget(self.diagnostic_label)
 
         contract_box = QGroupBox(self)
         contract_layout = QVBoxLayout(contract_box)
@@ -3088,6 +3115,11 @@ class MainWindow(QMainWindow):
         self._update_market_panel(status)
 
     def on_diagnostic_ready(self, info: dict[str, Any]) -> None:
+        self.latest_diagnostic_info = dict(info)
+        if self.config_dialog is not None:
+            self.config_dialog.set_diagnostic_text(self._format_diagnostic_text(info))
+
+    def _format_diagnostic_text(self, info: dict[str, Any]) -> str:
         ports = ",".join(str(port) for port in info.get("candidate_ports", []))
         lines = [
             f"配置文件: {info.get('config_path', '')}",
@@ -3102,7 +3134,7 @@ class MainWindow(QMainWindow):
             lines.append(f"连接说明: {connect_note}")
         if qmt_error:
             lines.append(f"错误信息: {qmt_error}")
-        self.diagnostic_label.setText("\n".join(lines))
+        return "\n".join(lines)
 
     def on_rows_ready(self, rows: list[dict[str, Any]]) -> None:
         self.latest_rows = rows
@@ -3220,13 +3252,22 @@ class MainWindow(QMainWindow):
             self.on_rows_ready(self.latest_rows)
 
     def open_config_dialog(self) -> None:
-        dialog = ConfigDialog(load_app_config(self.config_path), self)
+        dialog = ConfigDialog(
+            load_app_config(self.config_path),
+            self,
+            diagnostic_text=self._format_diagnostic_text(self.latest_diagnostic_info)
+            if self.latest_diagnostic_info
+            else "",
+        )
+        self.config_dialog = dialog
         if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.config_dialog = None
             return
         try:
             config = dialog.to_config()
             save_app_config(self.config_path, config)
         except ValueError as exc:
+            self.config_dialog = None
             QMessageBox.warning(self, "配置保存失败", str(exc))
             return
 
@@ -3236,6 +3277,7 @@ class MainWindow(QMainWindow):
         self.sound_checkbox.blockSignals(True)
         self.sound_checkbox.setChecked(self.fees.sound_enabled)
         self.sound_checkbox.blockSignals(False)
+        self.config_dialog = None
         QMessageBox.information(self, "配置已保存", "配置已写入文件，后台线程将自动重启并加载新配置。")
         self._restart_worker()
 
