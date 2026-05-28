@@ -1,0 +1,96 @@
+{
+  "qmt": {
+    "qmt_path": "",
+    "poll_interval_ms": 500,
+    "enable_mock_when_xtquant_missing": false,
+    "auto_atm": true,
+    "atm_refresh_sec": 300,
+    "atm_strike_tiers": 5
+  },
+  "fees": {
+    "multiplier": 10000,
+    "option_open_fee": 1.7,
+    "option_exercise_fee": 4.0,
+    "stock_commission_rate": 0.0002,
+    "stock_borrow_cost": 0.0,
+    "yellow_threshold": 20.0,
+    "red_threshold": 50.0,
+    "alert_frequency_hz": 1200,
+    "alert_duration_ms": 250,
+    "alert_cooldown_sec": 3.0,
+    "min_display_profit": -999999.0,
+    "sound_enabled": false
+  },
+  "contract_pools": [
+    {
+      "name": "50ETF",
+      "spot_code": "510050.SH",
+      "options": [
+        {
+          "name": "50ETF 平值 10011296/10011305",
+          "strike": 0.0,
+          "call_code": "",
+          "put_code": "",
+          "expiry": "2026-06-24",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "name": "588000ETF",
+      "spot_code": "588000.SH",
+      "options": [
+        {
+          "name": "588000ETF 平值自动",
+          "strike": 0.0,
+          "call_code": "",
+          "put_code": "",
+          "expiry": "2026-06-24",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "name": "300ETF",
+      "spot_code": "510300.SH",
+      "options": [
+        {
+          "name": "300ETF 平值自动",
+          "strike": 0.0,
+          "call_code": "",
+          "put_code": "",
+          "expiry": "2026-06-24",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "name": "500ETF",
+      "spot_code": "510500.SH",
+      "options": [
+        {
+          "name": "500ETF 平值自动",
+          "strike": 0.0,
+          "call_code": "",
+          "put_code": "",
+          "expiry": "2026-06-24",
+          "enabled": true
+        }
+      ]
+    },
+    {
+      "name": "159915",
+      "spot_code": "159915.SZ",
+      "options": [
+        {
+          "name": "159915 平值自动",
+          "strike": 0.0,
+          "call_code": "",
+          "put_code": "",
+          "expiry": "2026-06-24",
+          "enabled": true
+        }
+      ]
+    }
+  ]
+}
