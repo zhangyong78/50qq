@@ -1121,6 +1121,105 @@ def option_intrinsic_time_value(
     return intrinsic, time_value
 
 
+def option_moneyness_text(spot_price: float, strike: float, *, is_call: bool) -> str:
+    if spot_price <= 0 or strike <= 0:
+        return "未知"
+    epsilon = 0.001
+    diff = spot_price - strike
+    if abs(diff) <= epsilon:
+        return "近平值"
+    if is_call:
+        return "当前价内" if diff > 0 else "当前价外"
+    return "当前价内" if diff < 0 else "当前价外"
+
+
+def recommendation_effective_profit(row: dict[str, Any]) -> float:
+    profit = float(row.get("profit", 0.0))
+    if bool(row.get("alert_eligible")):
+        return profit
+
+    moneyness = str(row.get("moneyness_text", ""))
+    upper_profit = row.get("exercise_upper_profit")
+    if moneyness == "当前价内" and upper_profit is not None:
+        return float(upper_profit)
+    return float("-inf")
+
+
+def recommendation_profit_label(row: dict[str, Any]) -> str:
+    if bool(row.get("alert_eligible")):
+        return "保底收益"
+    if str(row.get("moneyness_text", "")) == "当前价内" and row.get("exercise_upper_profit") is not None:
+        return "若被行权收益"
+    return str(row.get("profit_type", ""))
+
+
+def recommendation_rank_key(row: dict[str, Any]) -> tuple[int, float, int, float]:
+    effective_profit = recommendation_effective_profit(row)
+    moneyness = str(row.get("moneyness_text", ""))
+    if effective_profit == float("-inf") or effective_profit <= 0:
+        return (9, 0.0, 9, 0.0)
+
+    moneyness_priority = 0 if moneyness == "当前价内" else 1
+    certainty_priority = 0 if bool(row.get("alert_eligible")) else 1
+    return (moneyness_priority, -effective_profit, certainty_priority, -float(row.get("profit", 0.0)))
+
+
+def build_recommendations(rows: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
+    max_count = max(0, int(limit))
+    if max_count == 0:
+        return []
+
+    candidates = [
+        row
+        for row in rows
+        if recommendation_effective_profit(row) != float("-inf")
+        and recommendation_effective_profit(row) > 0
+    ]
+    candidates.sort(key=recommendation_rank_key)
+    return candidates[:max_count]
+
+
+FORMULA_EXPLANATION_TEXT = """
+模式1 买入认沽 + 买入现货
+保底收益 = 现货买入成本按卖一 + 认沽买入成本按卖一 + 买入开仓费1.7 + 主动行权费4 之后，
+在到期最差按K卖出现货时的保底结果。
+
+公式：
+K×10000 - [现货卖一×10000×(1+佣金率) + 认沽卖一×10000 + 买入开仓费 + 主动行权费]
+
+模式2 卖出认沽 + 卖出现货
+每张收益(元) = 未被行权估算。
+假设卖出认沽开仓不收费，且最终未被行权，然后按现货卖一回补恢复头寸。
+
+公式：
+现货买一×10000×(1-佣金率) + 认沽买一×10000 - 现货卖一×10000×(1+佣金率)
+
+若被行权收益 = 若到期买方最终行权，你按K被动接货时的收益。
+
+公式：
+现货买一×10000×(1-佣金率) + 认沽买一×10000 - K×10000
+
+模式3 卖出认购 + 持有现货
+每张收益(元) = 未被行权估算。
+假设卖出认购开仓不收费，且最终未被行权，然后按现货买一卖出现货落袋。
+
+公式：
+现货买一×10000×(1-佣金率) + 认购买一×10000 - 现货卖一×10000×(1+佣金率)
+
+若被行权收益 = 若到期买方最终行权，你按K被动交券时的收益。
+
+公式：
+K×10000 + 认购买一×10000 - 现货卖一×10000×(1+佣金率)
+
+模式4 买入认购 + 卖出现货
+保底收益 = 现货卖出后，未来最差按K主动行权买回现货，再扣买入开仓费1.7和主动行权费4后的保底结果。
+
+公式：
+现货买一×10000×(1-佣金率)
+- [K×10000 + 认购卖一×10000 + 买入开仓费 + 主动行权费 + 融券成本]
+""".strip()
+
+
 def safe_option_detail(xtdata: Any, code: str, *, spot_code: str = "") -> dict[str, Any] | None:
     if not code:
         return None
@@ -1908,7 +2007,8 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
             continue
 
         multiplier = fees.multiplier
-        option_fees = fees.option_open_fee + fees.option_exercise_fee
+        buy_side_option_fees = fees.option_open_fee + fees.option_exercise_fee
+        active_exercise_fee = fees.option_exercise_fee
         stock_commission = fees.stock_commission_rate
         strike_cash = pair.strike * multiplier
 
@@ -1922,11 +2022,15 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式1 买入认沽 + 买入持有现货",
                 "option_code": pair.put_code,
                 "is_call": False,
+                "profit_type": "保底收益",
+                "alert_eligible": True,
                 "option_bid": put.bid1,
                 "option_ask": put.ask1,
                 "option_mid": put_mid,
                 "profit": strike_cash
-                - ((spot.ask1 * multiplier) * (1 + stock_commission) + (put.ask1 * multiplier) + option_fees),
+                - ((spot.ask1 * multiplier) * (1 + stock_commission) + (put.ask1 * multiplier) + buy_side_option_fees),
+                "exercise_upper_profit": None,
+                "exercise_condition": "欧式到期结构；到期最差按K形成保底，若到期现货高于K，实际结果可能更好",
                 "action": "现货按卖一买入，认沽按卖一买入；主动行权认沽价卖出现货",
             },
             {
@@ -1934,11 +2038,16 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式2 卖出认沽 + 卖出现货",
                 "option_code": pair.put_code,
                 "is_call": False,
+                "profit_type": "条件结构",
+                "alert_eligible": False,
                 "option_bid": put.bid1,
                 "option_ask": put.ask1,
                 "option_mid": put_mid,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (put.bid1 * multiplier))
-                - (strike_cash + option_fees),
+                - ((spot.ask1 * multiplier) * (1 + stock_commission)),
+                "exercise_upper_profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (put.bid1 * multiplier))
+                - strike_cash,
+                "exercise_condition": "卖出认沽开仓不收费，被动接货也不收行权费；主收益按未被行权且按现货卖一回补恢复头寸估算，仅到期<=K且买方最终行权时才接近右侧上限",
                 "action": "现货按买一卖出，认沽按买一卖出；被动行权转入期权账户资金等待接货",
             },
             {
@@ -1946,11 +2055,16 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式3 卖出认购+买入持有现货",
                 "option_code": pair.call_code,
                 "is_call": True,
+                "profit_type": "条件结构",
+                "alert_eligible": False,
                 "option_bid": call.bid1,
                 "option_ask": call.ask1,
                 "option_mid": call_mid,
-                "profit": (strike_cash + (call.bid1 * multiplier))
-                - ((spot.ask1 * multiplier) * (1 + stock_commission) + option_fees),
+                "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (call.bid1 * multiplier))
+                - ((spot.ask1 * multiplier) * (1 + stock_commission)),
+                "exercise_upper_profit": (strike_cash + (call.bid1 * multiplier))
+                - ((spot.ask1 * multiplier) * (1 + stock_commission)),
+                "exercise_condition": "卖出认购开仓不收费，被动交券也不收行权费；主收益按未被行权且按现货买一卖出落袋估算，仅到期>=K且买方最终行权时才接近右侧上限",
                 "action": "持有现货+卖出认购；被动行权提供现货",
             },
             {
@@ -1958,11 +2072,15 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式4 买入认购 + 卖出现货",
                 "option_code": pair.call_code,
                 "is_call": True,
+                "profit_type": "保底收益",
+                "alert_eligible": True,
                 "option_bid": call.bid1,
                 "option_ask": call.ask1,
                 "option_mid": call_mid,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission))
-                - (strike_cash + (call.ask1 * multiplier) + option_fees + fees.stock_borrow_cost),
+                - (strike_cash + (call.ask1 * multiplier) + fees.option_open_fee + active_exercise_fee + fees.stock_borrow_cost),
+                "exercise_upper_profit": None,
+                "exercise_condition": "欧式到期结构；到期最差按K回补，若到期现货低于K，实际结果可能更好",
                 "action": "现货按买一卖出，认购按卖一买入；主动行权转入期权账户资金按认购价买入现货",
             },
         ]
@@ -1977,6 +2095,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 float(item["option_mid"]),
                 is_call=bool(item["is_call"]),
             )
+            moneyness = option_moneyness_text(spot_mid, pair.strike, is_call=bool(item["is_call"]))
             rows.append(
                 {
                     "mode_key": item["mode_key"],
@@ -1990,6 +2109,10 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                     "ref_atm_strike": pair.ref_atm_strike,
                     "is_adjusted": pair.is_adjusted,
                     "profit": profit,
+                    "profit_type": item["profit_type"],
+                    "alert_eligible": bool(item["alert_eligible"]),
+                    "moneyness_text": moneyness,
+                    "exercise_upper_profit": item.get("exercise_upper_profit"),
                     "spot_bid": spot.bid1,
                     "spot_ask": spot.ask1,
                     "option_bid": item["option_bid"],
@@ -1997,6 +2120,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                     "intrinsic_value": intrinsic,
                     "time_value": time_value,
                     "expiry": pair.expiry,
+                    "exercise_condition": item["exercise_condition"],
                     "action": item["action"],
                     "updated_at": now_text,
                     "alert_key": f"{item['mode_key']}|{pair.spot_code}|{item['option_code']}|{pair.strike}",
@@ -2328,6 +2452,8 @@ class QuoteWorker(QThread):
         for row in rows:
             if not self.is_sound_enabled():
                 return
+            if not bool(row.get("alert_eligible")):
+                continue
             if float(row["profit"]) < fees.red_threshold:
                 continue
             if not self._row_quote_is_valid(row):
@@ -2432,8 +2558,8 @@ class ConfigDialog(QDialog):
         self.min_display_profit_spin = self._build_double_spinbox(-999999, 999999, 2)
         self.sound_enabled_checkbox = QCheckBox("启用声音报警", fee_box)
         fee_form.addRow("合约乘数", self.multiplier_spin)
-        fee_form.addRow("期权开仓费", self.option_open_fee_spin)
-        fee_form.addRow("期权行权费", self.option_exercise_fee_spin)
+        fee_form.addRow("期权买入开仓费", self.option_open_fee_spin)
+        fee_form.addRow("主动行权费", self.option_exercise_fee_spin)
         fee_form.addRow("现货佣金率", self.stock_commission_rate_spin)
         fee_form.addRow("融券利息成本", self.stock_borrow_cost_spin)
         fee_form.addRow("黄色高亮阈值", self.yellow_threshold_spin)
@@ -2719,7 +2845,10 @@ class MainWindow(QMainWindow):
         "期权代码",
         "行权价",
         "档位",
-        "每张净利润(元)",
+        "每张收益(元)",
+        "若被行权上限",
+        "收益类型",
+        "当前状态",
         "现货买一",
         "现货卖一",
         "期权买一",
@@ -2728,11 +2857,13 @@ class MainWindow(QMainWindow):
         "时间价值",
         "到期日",
         "更新时间",
+        "实现条件",
         "操作参考盘口说明",
     ]
-    _NUMERIC_TABLE_COLUMNS = {2, 4, 5, 6, 7, 8, 9, 10}
+    _NUMERIC_TABLE_COLUMNS = {2, 4, 5, 8, 9, 10, 11, 12, 13}
     _PROFIT_COLUMN = 4
-    _TIME_VALUE_COLUMN = 10
+    _UPPER_PROFIT_COLUMN = 5
+    _TIME_VALUE_COLUMN = 13
 
     def __init__(self, config_path: Path) -> None:
         super().__init__()
@@ -2773,15 +2904,18 @@ class MainWindow(QMainWindow):
         self.sound_checkbox.toggled.connect(self.on_sound_toggled)
         self.config_button = QPushButton("配置")
         self.config_button.clicked.connect(self.open_config_dialog)
+        self.formula_button = QPushButton("公式")
+        self.formula_button.clicked.connect(self.show_formula_explanation)
         self.reload_button = QPushButton("重载")
         self.reload_button.clicked.connect(self.reload_config)
         self.freeze_button = QPushButton("锁定")
         self.freeze_button.clicked.connect(self.toggle_freeze)
-        for button in (self.config_button, self.reload_button, self.freeze_button):
+        for button in (self.config_button, self.formula_button, self.reload_button, self.freeze_button):
             button.setFixedHeight(24)
             button.setStyleSheet("font-size:11px; padding:0 8px;")
         toolbar.addWidget(self.sound_checkbox)
         toolbar.addWidget(self.config_button)
+        toolbar.addWidget(self.formula_button)
         toolbar.addWidget(self.reload_button)
         toolbar.addWidget(self.freeze_button)
 
@@ -2820,8 +2954,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.error_banner)
 
         contract_box = QGroupBox(self)
+        contract_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         contract_layout = QVBoxLayout(contract_box)
+        contract_layout.setContentsMargins(6, 4, 6, 6)
+        contract_layout.setSpacing(4)
         contract_head = QHBoxLayout()
+        contract_head.setContentsMargins(0, 0, 0, 0)
         contract_caption = QLabel("当前平值合约")
         contract_caption.setStyleSheet("font-weight: 600; color: #333333;")
         self.option_summary_label = QLabel("期权盘口：等待连接")
@@ -2841,10 +2979,37 @@ class MainWindow(QMainWindow):
         self.contract_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
-        self.contract_table.setMinimumHeight(120)
-        self.contract_table.setMaximumHeight(200)
+        self.contract_table.setStyleSheet(
+            "QTableWidget { font-size: 11px; }"
+            "QHeaderView::section { font-size: 10px; padding: 2px 4px; }"
+        )
+        self.contract_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.contract_table.setMinimumHeight(88)
+        self.contract_table.setMaximumHeight(156)
         contract_layout.addWidget(self.contract_table)
         layout.addWidget(contract_box)
+
+        recommend_box = QGroupBox("推荐操作", self)
+        recommend_layout = QVBoxLayout(recommend_box)
+        self.recommendation_label = QLabel("推荐1-3：等待行情与收益计算，默认优先展示保底收益机会。")
+        self.recommendation_label.setWordWrap(True)
+        self.recommendation_label.setStyleSheet(
+            "background:#f6fbf7; color:#1f3b2d; padding:6px 8px; border-radius:4px;"
+            "border:1px solid #cfe8d6; font-size:12px;"
+        )
+        recommend_layout.addWidget(self.recommendation_label)
+        layout.addWidget(recommend_box)
+
+        filtered_recommend_box = QGroupBox("当前筛选推荐", self)
+        filtered_recommend_layout = QVBoxLayout(filtered_recommend_box)
+        self.filtered_recommendation_label = QLabel("等待下方品种筛选与行情联动。")
+        self.filtered_recommendation_label.setWordWrap(True)
+        self.filtered_recommendation_label.setStyleSheet(
+            "background:#fffaf0; color:#5f370e; padding:6px 8px; border-radius:4px;"
+            "border:1px solid #f3d7a3; font-size:12px;"
+        )
+        filtered_recommend_layout.addWidget(self.filtered_recommendation_label)
+        layout.addWidget(filtered_recommend_box)
 
         filter_box = QGroupBox("表格筛选", self)
         filter_row = QHBoxLayout(filter_box)
@@ -2962,6 +3127,7 @@ class MainWindow(QMainWindow):
             self.pool_filter_layout.addWidget(checkbox)
         if self.latest_rows and not self.is_frozen:
             self.render_rows(self.latest_rows)
+            self._update_recommendations(self.latest_rows)
 
     def _selected_pool_names(self) -> set[str]:
         return {name for name, checkbox in self.pool_checkboxes.items() if checkbox.isChecked()}
@@ -2986,6 +3152,9 @@ class MainWindow(QMainWindow):
             table.setRowCount(0)
             self._set_mode_box_count(mode_key, 0)
         self._update_market_panel({"spots": {}, "contracts": {}, "option_total": 0, "option_ok": 0, "error": ""})
+        self._sync_contract_table_height()
+        self.recommendation_label.setText("推荐1-3：等待行情与收益计算，默认优先展示保底收益机会。")
+        self.filtered_recommendation_label.setText("等待下方品种筛选与行情联动。")
         self.on_status_ready("正在重新连接 QMT...", False)
         self._start_worker()
 
@@ -3072,6 +3241,16 @@ class MainWindow(QMainWindow):
                     item.setForeground(QColor("#c62828"))
                 self.contract_table.setItem(row_index, column, item)
         self.contract_table.resizeColumnsToContents()
+        self._sync_contract_table_height()
+
+    def _sync_contract_table_height(self) -> None:
+        row_count = max(1, self.contract_table.rowCount())
+        visible_rows = min(row_count, 6)
+        header_height = self.contract_table.horizontalHeader().height()
+        row_height = self.contract_table.verticalHeader().defaultSectionSize()
+        frame_height = self.contract_table.frameWidth() * 2
+        table_height = header_height + (visible_rows * row_height) + frame_height + 6
+        self.contract_table.setFixedHeight(max(88, min(156, table_height)))
 
     @staticmethod
     def _format_qmt_status_display(message: str) -> str:
@@ -3140,6 +3319,7 @@ class MainWindow(QMainWindow):
         self.latest_rows = rows
         if not self.is_frozen:
             self.render_rows(rows)
+        self._update_recommendations(rows)
         mode_counts = " | ".join(
             f"{mode_key} {len(self.rendered_rows_by_mode.get(mode_key, []))}条"
             for mode_key, _, _ in ARBITRAGE_MODE_DEFS
@@ -3150,7 +3330,111 @@ class MainWindow(QMainWindow):
             f" 黄色阈值 >= {self.fees.yellow_threshold:.2f} 元，"
             f" 红色/声音阈值 >= {self.fees.red_threshold:.2f} 元，"
             f" 当前声音报警：{sound_text}。"
+            " 红黄高亮：保底收益始终参与；条件结构在当前价内时按若被行权收益参与高亮。"
         )
+
+    def _update_recommendations(self, rows: list[dict[str, Any]]) -> None:
+        self.recommendation_label.setText(
+            self._build_recommendation_text(
+                build_recommendations(rows, limit=3),
+                empty_text="推荐1-3：当前没有可直接下手的正收益候选，建议继续等待盘口变化。",
+            )
+        )
+
+        selected_pools = sorted(self._selected_pool_names())
+        pool_hint = "、".join(selected_pools) if selected_pools else "未勾选品种"
+        filtered_rows = self._display_filtered_rows(rows)
+        self.filtered_recommendation_label.setText(
+            self._build_recommendation_text(
+                build_recommendations(filtered_rows, limit=3),
+                empty_text=f"当前筛选推荐：{pool_hint} 下暂无正收益候选。",
+                title_prefix=f"当前筛选推荐（{pool_hint}）",
+            )
+        )
+
+    def _build_recommendation_text(
+        self,
+        picks: list[dict[str, Any]],
+        *,
+        empty_text: str,
+        title_prefix: str = "",
+    ) -> str:
+        if not picks:
+            return empty_text
+
+        lines = []
+        if title_prefix:
+            lines.append(f"{title_prefix}：")
+        for index, row in enumerate(picks, start=1):
+            upper_profit = row.get("exercise_upper_profit")
+            upper_text = (
+                f"，若被行权收益 {float(upper_profit):.2f} 元"
+                if upper_profit is not None
+                else ""
+            )
+            effective_label = recommendation_profit_label(row)
+            effective_profit = recommendation_effective_profit(row)
+            lines.append(
+                f"推荐{index}：{row['mode_key']} {row['pool']} "
+                f"K={format_strike_display(float(row['strike']), str(row.get('spot_code', '')))}，"
+                f"{effective_label} {effective_profit:.2f} 元，"
+                f"{row.get('moneyness_text', '')}{upper_text}；"
+                f"公式：{self._recommendation_formula_text(row)}"
+            )
+        if any(not bool(row.get("alert_eligible")) for row in picks):
+            lines.append("说明：条件结构仅在当前价内时，按若被行权收益参与推荐排序。")
+        return "\n".join(lines)
+
+    def _recommendation_formula_text(self, row: dict[str, Any]) -> str:
+        multiplier = float(self.fees.multiplier)
+        stock_commission = float(self.fees.stock_commission_rate)
+        option_open_fee = float(self.fees.option_open_fee)
+        option_exercise_fee = float(self.fees.option_exercise_fee)
+        stock_borrow_cost = float(self.fees.stock_borrow_cost)
+        strike = float(row.get("strike", 0.0))
+        spot_bid = float(row.get("spot_bid", 0.0))
+        spot_ask = float(row.get("spot_ask", 0.0))
+        option_bid = float(row.get("option_bid", 0.0))
+        option_ask = float(row.get("option_ask", 0.0))
+        effective_profit = recommendation_effective_profit(row)
+        effective_label = recommendation_profit_label(row)
+        mode_key = str(row.get("mode_key", ""))
+
+        if mode_key == "模式1":
+            return (
+                f"{effective_label} = {strike:.4f}×{multiplier:.0f}"
+                f" - [{spot_ask:.4f}×{multiplier:.0f}×(1+{stock_commission:.6f})"
+                f" + {option_ask:.4f}×{multiplier:.0f} + {option_open_fee:.2f} + {option_exercise_fee:.2f}]"
+                f" = {effective_profit:.2f} 元"
+            )
+        if mode_key == "模式2":
+            return (
+                f"{effective_label} = {spot_bid:.4f}×{multiplier:.0f}×(1-{stock_commission:.6f})"
+                f" + {option_bid:.4f}×{multiplier:.0f} - {strike:.4f}×{multiplier:.0f}"
+                f" = {effective_profit:.2f} 元"
+            )
+        if mode_key == "模式3":
+            if effective_label == "若被行权收益":
+                return (
+                    f"{effective_label} = {strike:.4f}×{multiplier:.0f}"
+                    f" + {option_bid:.4f}×{multiplier:.0f}"
+                    f" - {spot_ask:.4f}×{multiplier:.0f}×(1+{stock_commission:.6f})"
+                    f" = {effective_profit:.2f} 元"
+                )
+            return (
+                f"{effective_label} = {spot_bid:.4f}×{multiplier:.0f}×(1-{stock_commission:.6f})"
+                f" + {option_bid:.4f}×{multiplier:.0f}"
+                f" - {spot_ask:.4f}×{multiplier:.0f}×(1+{stock_commission:.6f})"
+                f" = {effective_profit:.2f} 元"
+            )
+        if mode_key == "模式4":
+            return (
+                f"{effective_label} = {spot_bid:.4f}×{multiplier:.0f}×(1-{stock_commission:.6f})"
+                f" - [{strike:.4f}×{multiplier:.0f} + {option_ask:.4f}×{multiplier:.0f}"
+                f" + {option_open_fee:.2f} + {option_exercise_fee:.2f} + {stock_borrow_cost:.2f}]"
+                f" = {effective_profit:.2f} 元"
+            )
+        return f"{effective_label} = {effective_profit:.2f} 元"
 
     def _selected_atm_tiers(self) -> set[int]:
         return {tier for tier, checkbox in self.tier_checkboxes.items() if checkbox.isChecked()}
@@ -3163,18 +3447,27 @@ class MainWindow(QMainWindow):
             return
         if self.latest_rows:
             self.render_rows(self.latest_rows)
+            self._update_recommendations(self.latest_rows)
 
-    def _rows_for_mode(self, rows: list[dict[str, Any]], mode_key: str) -> list[dict[str, Any]]:
+    def _display_filtered_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         selected_tiers = self._selected_atm_tiers()
         selected_pools = self._selected_pool_names()
         hide_adjusted = self.hide_adjusted_checkbox.isChecked()
         filtered = [
             row
             for row in rows
-            if row.get("mode_key") == mode_key
-            and int(row.get("atm_tier", 0)) in selected_tiers
+            if int(row.get("atm_tier", 0)) in selected_tiers
             and str(row.get("pool", "")) in selected_pools
             and not (hide_adjusted and bool(row.get("is_adjusted")))
+        ]
+        filtered.sort(key=recommendation_rank_key)
+        return filtered
+
+    def _rows_for_mode(self, rows: list[dict[str, Any]], mode_key: str) -> list[dict[str, Any]]:
+        filtered = [
+            row
+            for row in self._display_filtered_rows(rows)
+            if row.get("mode_key") == mode_key
         ]
         filtered.sort(key=lambda row: (int(row.get("atm_tier", 0)), -float(row["profit"])))
         return filtered
@@ -3196,6 +3489,13 @@ class MainWindow(QMainWindow):
                 format_strike_display(float(row["strike"]), str(row.get("spot_code", ""))),
                 str(row.get("tier_label") or format_atm_tier_label(int(row.get("atm_tier", 0)))),
                 f"{row['profit']:.2f}",
+                (
+                    f"{float(row['exercise_upper_profit']):.2f}"
+                    if row.get("exercise_upper_profit") is not None
+                    else "-"
+                ),
+                row.get("profit_type", ""),
+                row.get("moneyness_text", ""),
                 f"{row['spot_bid']:.4f}",
                 f"{row['spot_ask']:.4f}",
                 f"{row['option_bid']:.4f}",
@@ -3204,6 +3504,7 @@ class MainWindow(QMainWindow):
                 f"{float(row['time_value']):.4f}",
                 row["expiry"],
                 row["updated_at"],
+                row.get("exercise_condition", ""),
                 row["action"],
             ]
             for column, value in enumerate(values):
@@ -3211,17 +3512,37 @@ class MainWindow(QMainWindow):
                 if column in self._NUMERIC_TABLE_COLUMNS:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if column == self._PROFIT_COLUMN:
-                    self._apply_profit_color(item, float(row["profit"]))
+                    self._apply_profit_color(item, float(row["profit"]), bool(row.get("alert_eligible")))
+                if column == self._UPPER_PROFIT_COLUMN:
+                    self._apply_upper_profit_color(
+                        item,
+                        row.get("exercise_upper_profit"),
+                        highlight_eligible=(
+                            not bool(row.get("alert_eligible"))
+                            and str(row.get("moneyness_text", "")) == "当前价内"
+                        ),
+                    )
                 if column == self._TIME_VALUE_COLUMN and float(row["time_value"]) < 0:
                     item.setForeground(QColor("#d90429"))
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
+                if column == 6:
+                    self._apply_profit_type_style(item, bool(row.get("alert_eligible")))
+                if column == 7:
+                    self._apply_moneyness_style(item, str(row.get("moneyness_text", "")))
                 table.setItem(row_index, column, item)
         table.resizeColumnsToContents()
         table.setSortingEnabled(True)
 
-    def _apply_profit_color(self, item: QTableWidgetItem, profit: float) -> None:
+    def _apply_profit_color(self, item: QTableWidgetItem, profit: float, alert_eligible: bool) -> None:
+        if not alert_eligible:
+            if profit > 0:
+                item.setBackground(QColor("#e3f2fd"))
+                item.setForeground(QColor("#0d47a1"))
+            elif profit < 0:
+                item.setForeground(QColor("#666666"))
+            return
         if profit >= self.fees.red_threshold:
             item.setBackground(QColor("#d90429"))
             item.setForeground(QColor("#ffffff"))
@@ -3230,6 +3551,50 @@ class MainWindow(QMainWindow):
             item.setForeground(QColor("#111111"))
         elif profit < 0:
             item.setForeground(QColor("#666666"))
+
+    @staticmethod
+    def _apply_profit_type_style(item: QTableWidgetItem, alert_eligible: bool) -> None:
+        if alert_eligible:
+            item.setForeground(QColor("#0b7a3b"))
+        else:
+            item.setForeground(QColor("#0d47a1"))
+
+    def _apply_upper_profit_color(
+        self,
+        item: QTableWidgetItem,
+        profit: Any,
+        *,
+        highlight_eligible: bool,
+    ) -> None:
+        if profit is None:
+            item.setForeground(QColor("#777777"))
+            return
+        try:
+            value = float(profit)
+        except (TypeError, ValueError):
+            item.setForeground(QColor("#777777"))
+            return
+        if highlight_eligible:
+            if value >= self.fees.red_threshold:
+                item.setBackground(QColor("#d90429"))
+                item.setForeground(QColor("#ffffff"))
+                return
+            if value >= self.fees.yellow_threshold:
+                item.setBackground(QColor("#ffe66d"))
+                item.setForeground(QColor("#111111"))
+                return
+        if value > 0:
+            item.setBackground(QColor("#eef6ff"))
+            item.setForeground(QColor("#0d47a1"))
+        elif value < 0:
+            item.setForeground(QColor("#666666"))
+
+    @staticmethod
+    def _apply_moneyness_style(item: QTableWidgetItem, text: str) -> None:
+        if text == "当前价内":
+            item.setForeground(QColor("#b54708"))
+        elif text == "当前价外":
+            item.setForeground(QColor("#555555"))
 
     def toggle_freeze(self) -> None:
         self.is_frozen = not self.is_frozen
@@ -3250,6 +3615,9 @@ class MainWindow(QMainWindow):
         self.fees = FeeConfig.from_dict(self.config["fees"])
         if self.latest_rows:
             self.on_rows_ready(self.latest_rows)
+
+    def show_formula_explanation(self) -> None:
+        QMessageBox.information(self, "四模式公式说明", FORMULA_EXPLANATION_TEXT)
 
     def open_config_dialog(self) -> None:
         dialog = ConfigDialog(
