@@ -2,7 +2,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PyQt6.QtWidgets import QApplication
+
 from post_market_ledger import (
+    StrategyLedgerDialog,
     StrategyLedgerStore,
     calculate_settled_profit,
     format_settlement_formula,
@@ -116,6 +119,29 @@ class StrategyLedgerStoreTests(unittest.TestCase):
                 store.load("2026-7")
 
 
+class StrategyLedgerDialogTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_dialog_stores_monthly_records_beside_scanner_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            dialog = StrategyLedgerDialog(config_dir)
+
+            self.assertEqual(dialog.store.data_dir, config_dir / "strategy_ledger_data")
+            self.assertTrue(dialog.month_total_label.text().startswith("本月已结算"))
+
+    def test_passive_mode_disables_option_open_and_exercise_fees(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dialog = StrategyLedgerDialog(Path(temp_dir))
+            dialog.mode_combo.setCurrentIndex(1)
+
+            self.assertFalse(dialog.option_buy_open_fee_spin.isEnabled())
+            self.assertFalse(dialog.active_exercise_fee_spin.isEnabled())
+            self.assertEqual(dialog.option_buy_open_fee_spin.value(), 0.0)
+            self.assertEqual(dialog.active_exercise_fee_spin.value(), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
-
