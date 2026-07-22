@@ -2,7 +2,9 @@ import unittest
 from unittest.mock import patch
 
 from option_arbitrage_scanner import (
+    MainWindow,
     current_expiry_yyyymm,
+    option_exercise_status_text,
     option_moneyness_text,
     pick_atm_for_underlying,
     recommendation_effective_profit,
@@ -11,6 +13,58 @@ from option_arbitrage_scanner import (
 
 
 class ExpiryAndMoneynessTests(unittest.TestCase):
+    def test_profit_column_explicitly_states_unexercised_assumption(self):
+        self.assertEqual(MainWindow.MODE_TABLE_HEADERS[4], "未被行权每张收益(元)")
+
+    def test_exercise_status_column_follows_current_status_column(self):
+        self.assertEqual(MainWindow.MODE_TABLE_HEADERS[7], "当前状态")
+        self.assertEqual(MainWindow.MODE_TABLE_HEADERS[8], "当前行权判断")
+        self.assertEqual(MainWindow._TIME_VALUE_COLUMN, 14)
+
+    def test_quote_columns_are_split_into_three_color_groups(self):
+        styles = MainWindow._QUOTE_COLUMN_GROUP_STYLES
+        self.assertEqual(styles[9], styles[10])
+        self.assertEqual(styles[11], styles[12])
+        self.assertEqual(styles[13], styles[14])
+        self.assertEqual(len({styles[9], styles[11], styles[13]}), 3)
+
+    def test_exercise_status_uses_severity_based_alert_colors(self):
+        self.assertEqual(
+            MainWindow._exercise_status_alert_style("买入认沽：实值；需主动行权卖出现货"),
+            ("#d90429", "#ffffff"),
+        )
+        self.assertEqual(
+            MainWindow._exercise_status_alert_style("卖出认沽：实值；可能被行权接货"),
+            ("#ffe66d", "#7a4300"),
+        )
+        self.assertIsNone(MainWindow._exercise_status_alert_style("卖出认购：虚值；通常不行权"))
+
+    def test_exercise_status_explains_direction_and_expiry_outcome(self):
+        self.assertEqual(
+            option_exercise_status_text(3.0865, 3.10, is_call=True, is_long_option=False),
+            "卖出认购：虚值；若到期维持，通常不行权",
+        )
+        self.assertEqual(
+            option_exercise_status_text(3.0865, 3.10, is_call=False, is_long_option=False),
+            "卖出认沽：实值；若到期维持，可能被行权接货",
+        )
+        self.assertEqual(
+            option_exercise_status_text(3.10, 3.10, is_call=True, is_long_option=False),
+            "卖出认购：近平值；到期是否行权取决于结算价",
+        )
+        self.assertEqual(
+            option_exercise_status_text(3.0865, 3.10, is_call=False, is_long_option=True),
+            "买入认沽：实值；若到期维持，需主动行权卖出现货",
+        )
+        self.assertEqual(
+            option_exercise_status_text(3.0865, 3.10, is_call=True, is_long_option=True),
+            "买入认购：虚值；若到期维持，通常无需主动行权",
+        )
+        self.assertEqual(
+            option_exercise_status_text(3.20, 3.10, is_call=True, is_long_option=True),
+            "买入认购：实值；若到期维持，需主动行权买入现货回补",
+        )
+
     @patch("option_arbitrage_scanner.time.strftime", return_value="202607")
     def test_current_expiry_month_uses_calendar_month(self, _strftime):
         self.assertEqual(current_expiry_yyyymm(), "202607")

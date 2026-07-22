@@ -14,7 +14,8 @@
 - Validate `stock_shares == option_contracts * 10000`.
 - Defaults are stock commission `0.0002`, option buy-open `2` yuan/contract and active exercise `4` yuan/contract.
 - Modes 2 and 3 are passive settlement and charge neither option buy-open nor exercise fees.
-- Save data beside `contracts_config.json` in `strategy_ledger_data/YYYY-MM.json`.
+- Save data beside `contracts_config.json` in one `strategy_ledger.json` file;
+  the selected month is a display filter and total, not a separate file.
 - Preserve the current uncommitted scanner exercise-status changes; do not discard or rewrite them.
 
 ---

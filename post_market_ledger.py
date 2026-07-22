@@ -147,42 +147,41 @@ def format_settlement_formula(record: dict[str, Any]) -> str:
 
 
 class StrategyLedgerStore:
-    def __init__(self, data_dir: Path) -> None:
-        self.data_dir = Path(data_dir)
+    def __init__(self, config_dir: Path) -> None:
+        self.config_dir = Path(config_dir)
+        self.data_path = self.config_dir / "strategy_ledger.json"
+        self.legacy_data_dir = self.config_dir / "strategy_ledger_data"
 
-    def _path_for_month(self, month_text: str) -> Path:
-        if len(month_text) != 7 or month_text[4] != "-":
-            raise ValueError("Month format must be YYYY-MM")
-        try:
-            year = int(month_text[:4])
-            month = int(month_text[5:])
-        except ValueError as exc:
-            raise ValueError("Month format must be YYYY-MM") from exc
-        if year < 2000 or not 1 <= month <= 12:
-            raise ValueError("Month format must be YYYY-MM")
-        return self.data_dir / f"{month_text}.json"
-
-    def load(self, month_text: str) -> list[dict[str, Any]]:
-        path = self._path_for_month(month_text)
-        if not path.exists():
-            return []
+    @staticmethod
+    def _read_records(path: Path) -> list[dict[str, Any]]:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"Unable to read monthly ledger: {exc}") from exc
+            raise ValueError(f"Unable to read ledger: {exc}") from exc
         if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
-            raise ValueError("Monthly ledger must contain a record list")
+            raise ValueError("Ledger must contain a record list")
         return [dict(item) for item in payload]
 
-    def save(self, month_text: str, records: list[dict[str, Any]]) -> None:
-        path = self._path_for_month(month_text)
-        self.data_dir.mkdir(parents=True, exist_ok=True)
-        temporary_path = path.with_suffix(".json.tmp")
+    def load_all(self) -> list[dict[str, Any]]:
+        if self.data_path.exists():
+            return self._read_records(self.data_path)
+        if not self.legacy_data_dir.exists():
+            return []
+
+        # Preserve earlier monthly files until the user saves into the new single file.
+        records: list[dict[str, Any]] = []
+        for path in sorted(self.legacy_data_dir.glob("*.json")):
+            records.extend(self._read_records(path))
+        return records
+
+    def save_all(self, records: list[dict[str, Any]]) -> None:
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.data_path.with_suffix(".json.tmp")
         temporary_path.write_text(
             json.dumps(records, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        temporary_path.replace(path)
+        temporary_path.replace(self.data_path)
 
 
 class StrategyLedgerDialog(QDialog):
@@ -203,9 +202,10 @@ class StrategyLedgerDialog(QDialog):
 
     def __init__(self, config_dir: Path, parent=None) -> None:
         super().__init__(parent)
-        self.store = StrategyLedgerStore(Path(config_dir) / "strategy_ledger_data")
+        self.store = StrategyLedgerStore(Path(config_dir))
+        self.all_records: list[dict[str, Any]] = []
         self.records: list[dict[str, Any]] = []
-        self.editing_index: int | None = None
+        self.editing_record_id: str | None = None
         self.setWindowTitle("盘后策略账本")
         self.resize(1480, 760)
         self._build_ui()
@@ -364,10 +364,17 @@ class StrategyLedgerDialog(QDialog):
                 self.active_exercise_fee_spin.setValue(4.0)
 
     def load_selected_month(self) -> None:
-        self.editing_index = None
+        self.editing_record_id = None
         try:
-            self.records = self.store.load(self.selected_month_text())
+            self.all_records = self.store.load_all()
+            month_text = self.selected_month_text()
+            self.records = [
+                record
+                for record in self.all_records
+                if str(record.get("settlement_date", ""))[:7] == month_text
+            ]
         except ValueError as exc:
+            self.all_records = []
             self.records = []
             self.status_label.setText(str(exc))
         self.refresh_view()
@@ -405,7 +412,7 @@ class StrategyLedgerDialog(QDialog):
             QMessageBox.warning(self, "盘后策略账本", "请填写 ETF 代码。")
             return None
         record = {
-            "id": self.records[self.editing_index].get("id") if self.editing_index is not None else uuid.uuid4().hex,
+            "id": self.editing_record_id or uuid.uuid4().hex,
             "settlement_date": self.settlement_date_edit.date().toString("yyyy-MM-dd"),
             "mode": self._mode(),
             "etf_code": etf_code,
@@ -437,18 +444,25 @@ class StrategyLedgerDialog(QDialog):
         record = self._record_from_form()
         if record is None:
             return
-        if self.editing_index is None:
-            self.records.append(record)
+        if self.editing_record_id is None:
+            self.all_records.append(record)
         else:
-            self.records[self.editing_index] = record
+            for index, existing in enumerate(self.all_records):
+                if str(existing.get("id", "")) == self.editing_record_id:
+                    self.all_records[index] = record
+                    break
         self._persist_and_refresh()
         self.clear_form()
 
     def delete_selected_record(self) -> None:
-        if self.editing_index is None:
+        if self.editing_record_id is None:
             QMessageBox.information(self, "盘后策略账本", "请先选中一条记录。")
             return
-        del self.records[self.editing_index]
+        self.all_records = [
+            record
+            for record in self.all_records
+            if str(record.get("id", "")) != self.editing_record_id
+        ]
         self._persist_and_refresh()
         self.clear_form()
 
@@ -456,8 +470,8 @@ class StrategyLedgerDialog(QDialog):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return
-        self.editing_index = rows[0].row()
-        record = self.records[self.editing_index]
+        record = self.records[rows[0].row()]
+        self.editing_record_id = str(record.get("id", "")) or None
         mode_index = self.mode_combo.findData(record.get("mode", "mode1"))
         self.mode_combo.setCurrentIndex(max(mode_index, 0))
         self.settlement_date_edit.setDate(QDate.fromString(str(record.get("settlement_date", "")), "yyyy-MM-dd"))
@@ -476,7 +490,7 @@ class StrategyLedgerDialog(QDialog):
         self.save_button.setText("保存修改")
 
     def clear_form(self) -> None:
-        self.editing_index = None
+        self.editing_record_id = None
         self.table.clearSelection()
         self.settlement_date_edit.setDate(self.month_edit.date())
         self.option_code_edit.clear()
@@ -491,10 +505,29 @@ class StrategyLedgerDialog(QDialog):
         self.save_button.setText("新增记录")
         self._on_mode_changed()
 
+    def apply_prefill(self, prefill: dict[str, Any]) -> None:
+        self.clear_form()
+        mode_index = self.mode_combo.findData(str(prefill.get("mode", "mode1")))
+        self.mode_combo.setCurrentIndex(max(mode_index, 0))
+        self.etf_code_edit.setText(str(prefill.get("etf_code", "")))
+        self.option_code_edit.setText(str(prefill.get("option_code", "")))
+        self.strike_spin.setValue(float(prefill.get("strike", 0.0)))
+        self.stock_price_spin.setValue(float(prefill.get("stock_price", 0.0)))
+        self.option_premium_spin.setValue(float(prefill.get("option_premium", 0.0)))
+        self.stock_shares_spin.setValue(int(prefill.get("stock_shares", 10000)))
+        self.option_contracts_spin.setValue(int(prefill.get("option_contracts", 1)))
+        self.save_button.setText("新增记录")
+
     def _persist_and_refresh(self) -> None:
         try:
-            self.store.save(self.selected_month_text(), self.records)
+            self.store.save_all(self.all_records)
         except OSError as exc:
             QMessageBox.critical(self, "盘后策略账本", f"保存账本失败：{exc}")
             return
+        month_text = self.selected_month_text()
+        self.records = [
+            record
+            for record in self.all_records
+            if str(record.get("settlement_date", ""))[:7] == month_text
+        ]
         self.refresh_view()

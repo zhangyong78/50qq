@@ -45,5 +45,6 @@ mode change behavior continues to set option fees to zero for modes 2 and 3.
   code, strike, spot bid and option bid times 10,000.
 - Test that the dialog displays a supplied prefill and keeps 新增记录 as the
   action, not an automatic save.
+- Keep all records in the single `strategy_ledger.json` file beside
+  `contracts_config.json`; monthly totals are an interface filter.
 - Run the full test suite, compile check and rebuild the Windows executable.
-

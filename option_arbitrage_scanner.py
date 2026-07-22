@@ -49,6 +49,8 @@ from post_market_ledger import StrategyLedgerDialog
 
 
 CONFIG_FILE = "contracts_config.json"
+APP_VERSION = "V2026.07.23.01"
+APP_WINDOW_TITLE = f"A股ETF期权交割套利机会扫描器 {APP_VERSION}"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
 QMT_CONNECT_TIMEOUT_SEC = 4.0
 QMT_SCAN_ADDR_TIMEOUT_SEC = 2.0
@@ -76,6 +78,13 @@ ARBITRAGE_MODE_DEFS: list[tuple[str, str, str]] = [
         "持有现货+卖出认购；被动行权提供现货。",
     ),
 ]
+
+LEDGER_PREFILL_QUOTE_FIELDS = {
+    "模式1": ("mode1", "spot_ask", "option_ask"),
+    "模式2": ("mode2", "spot_bid", "option_bid"),
+    "模式3": ("mode3", "spot_ask", "option_bid"),
+    "模式4": ("mode4", "spot_bid", "option_ask"),
+}
 
 DEFAULT_UI_POOL_FILTER_NAMES = frozenset({"50ETF", "588000ETF"})
 
@@ -1145,6 +1154,34 @@ def option_is_in_the_money(spot_price: float, strike: float, *, is_call: bool) -
     return spot_price > strike if is_call else spot_price < strike
 
 
+def option_exercise_status_text(
+    spot_price: float,
+    strike: float,
+    *,
+    is_call: bool,
+    is_long_option: bool,
+) -> str:
+    """Describe the current moneyness and the matching expiry exercise outcome."""
+    side = ("买入" if is_long_option else "卖出") + ("认购" if is_call else "认沽")
+    if spot_price <= 0 or strike <= 0:
+        return f"{side}：行权状态未知"
+    if abs(spot_price - strike) <= 0.001:
+        action = "是否主动行权" if is_long_option else "到期是否行权"
+        return f"{side}：近平值；{action}取决于结算价"
+
+    is_in_the_money = option_is_in_the_money(spot_price, strike, is_call=is_call)
+    if is_long_option:
+        if is_in_the_money:
+            outcome = "需主动行权买入现货回补" if is_call else "需主动行权卖出现货"
+            return f"{side}：实值；若到期维持，{outcome}"
+        return f"{side}：虚值；若到期维持，通常无需主动行权"
+
+    if is_in_the_money:
+        outcome = "可能被行权交券" if is_call else "可能被行权接货"
+        return f"{side}：实值；若到期维持，{outcome}"
+    return f"{side}：虚值；若到期维持，通常不行权"
+
+
 def recommendation_effective_profit(row: dict[str, Any]) -> float:
     profit = float(row.get("profit", 0.0))
     if bool(row.get("alert_eligible")):
@@ -2029,6 +2066,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式1 买入认沽 + 买入持有现货",
                 "option_code": pair.put_code,
                 "is_call": False,
+                "is_long_option": True,
                 "profit_type": "保底收益",
                 "alert_eligible": True,
                 "option_bid": put.bid1,
@@ -2045,6 +2083,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式2 卖出认沽 + 卖出现货",
                 "option_code": pair.put_code,
                 "is_call": False,
+                "is_long_option": False,
                 "profit_type": "条件结构",
                 "alert_eligible": False,
                 "option_bid": put.bid1,
@@ -2062,6 +2101,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式3 卖出认购+买入持有现货",
                 "option_code": pair.call_code,
                 "is_call": True,
+                "is_long_option": False,
                 "profit_type": "条件结构",
                 "alert_eligible": False,
                 "option_bid": call.bid1,
@@ -2079,6 +2119,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "mode": "模式4 买入认购 + 卖出现货",
                 "option_code": pair.call_code,
                 "is_call": True,
+                "is_long_option": True,
                 "profit_type": "保底收益",
                 "alert_eligible": True,
                 "option_bid": call.bid1,
@@ -2108,6 +2149,12 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 is_call=bool(item["is_call"]),
             )
             moneyness = option_moneyness_text(spot_mid, pair.strike, is_call=bool(item["is_call"]))
+            exercise_status = option_exercise_status_text(
+                spot_mid,
+                pair.strike,
+                is_call=bool(item["is_call"]),
+                is_long_option=bool(item["is_long_option"]),
+            )
             rows.append(
                 {
                     "mode_key": item["mode_key"],
@@ -2125,6 +2172,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                     "alert_eligible": bool(item["alert_eligible"]),
                     "is_in_the_money": is_in_the_money,
                     "moneyness_text": moneyness,
+                    "exercise_status": exercise_status,
                     "exercise_upper_profit": item.get("exercise_upper_profit"),
                     "spot_bid": spot.bid1,
                     "spot_ask": spot.ask1,
@@ -2858,10 +2906,11 @@ class MainWindow(QMainWindow):
         "期权代码",
         "行权价",
         "档位",
-        "每张收益(元)",
+        "未被行权每张收益(元)",
         "若被行权上限",
         "收益类型",
         "当前状态",
+        "当前行权判断",
         "现货买一",
         "现货卖一",
         "期权买一",
@@ -2873,10 +2922,19 @@ class MainWindow(QMainWindow):
         "实现条件",
         "操作参考盘口说明",
     ]
-    _NUMERIC_TABLE_COLUMNS = {2, 4, 5, 8, 9, 10, 11, 12, 13}
+    _NUMERIC_TABLE_COLUMNS = {2, 4, 5, 9, 10, 11, 12, 13, 14}
     _PROFIT_COLUMN = 4
     _UPPER_PROFIT_COLUMN = 5
-    _TIME_VALUE_COLUMN = 13
+    _EXERCISE_STATUS_COLUMN = 8
+    _TIME_VALUE_COLUMN = 14
+    _QUOTE_COLUMN_GROUP_STYLES = {
+        9: ("#dbeafe", "#eff6ff", "#0c4a6e"),
+        10: ("#dbeafe", "#eff6ff", "#0c4a6e"),
+        11: ("#ede9fe", "#f5f3ff", "#5b21b6"),
+        12: ("#ede9fe", "#f5f3ff", "#5b21b6"),
+        13: ("#fef3c7", "#fffbeb", "#92400e"),
+        14: ("#fef3c7", "#fffbeb", "#92400e"),
+    }
 
     def __init__(self, config_path: Path) -> None:
         super().__init__()
@@ -2898,7 +2956,7 @@ class MainWindow(QMainWindow):
         self.pool_filter_layout: QHBoxLayout | None = None
         self.tier_filter_layout: QHBoxLayout | None = None
 
-        self.setWindowTitle("A股ETF期权交割套利机会扫描器")
+        self.setWindowTitle(APP_WINDOW_TITLE)
         self.resize(1680, 980)
         self._setup_ui()
         self._start_worker()
@@ -3089,6 +3147,10 @@ class MainWindow(QMainWindow):
 
             table = QTableWidget(0, len(self.MODE_TABLE_HEADERS), box)
             table.setHorizontalHeaderLabels(self.MODE_TABLE_HEADERS)
+            for header_column in range(len(self.MODE_TABLE_HEADERS)):
+                header_item = table.horizontalHeaderItem(header_column)
+                if header_item is not None:
+                    self._apply_quote_column_group_style(header_item, header_column, is_header=True)
             table.setAlternatingRowColors(True)
             table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -3517,6 +3579,7 @@ class MainWindow(QMainWindow):
                 ),
                 row.get("profit_type", ""),
                 row.get("moneyness_text", ""),
+                row.get("exercise_status", ""),
                 f"{row['spot_bid']:.4f}",
                 f"{row['spot_ask']:.4f}",
                 f"{row['option_bid']:.4f}",
@@ -3532,6 +3595,7 @@ class MainWindow(QMainWindow):
                 item = QTableWidgetItem(str(value))
                 if column in self._NUMERIC_TABLE_COLUMNS:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self._apply_quote_column_group_style(item, column)
                 if column == self._PROFIT_COLUMN:
                     self._apply_profit_color(item, float(row["profit"]), bool(row.get("alert_eligible")))
                 if column == self._UPPER_PROFIT_COLUMN:
@@ -3552,9 +3616,45 @@ class MainWindow(QMainWindow):
                     self._apply_profit_type_style(item, bool(row.get("alert_eligible")))
                 if column == 7:
                     self._apply_moneyness_style(item, str(row.get("moneyness_text", "")))
+                if column == self._EXERCISE_STATUS_COLUMN:
+                    self._apply_exercise_status_alert(item, str(row.get("exercise_status", "")))
                 table.setItem(row_index, column, item)
         table.resizeColumnsToContents()
         table.setSortingEnabled(True)
+
+    @classmethod
+    def _apply_quote_column_group_style(
+        cls,
+        item: QTableWidgetItem,
+        column: int,
+        *,
+        is_header: bool = False,
+    ) -> None:
+        style = cls._QUOTE_COLUMN_GROUP_STYLES.get(column)
+        if style is None:
+            return
+        header_color, cell_color, text_color = style
+        item.setBackground(QColor(header_color if is_header else cell_color))
+        item.setForeground(QColor(text_color))
+
+    @staticmethod
+    def _exercise_status_alert_style(text: str) -> tuple[str, str] | None:
+        if "需主动行权" in text:
+            return "#d90429", "#ffffff"
+        if "可能被行权" in text:
+            return "#ffe66d", "#7a4300"
+        return None
+
+    def _apply_exercise_status_alert(self, item: QTableWidgetItem, text: str) -> None:
+        style = self._exercise_status_alert_style(text)
+        if style is None:
+            return
+        background, foreground = style
+        item.setBackground(QColor(background))
+        item.setForeground(QColor(foreground))
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
 
     def _apply_profit_color(self, item: QTableWidgetItem, profit: float, alert_eligible: bool) -> None:
         if not alert_eligible:
@@ -3640,8 +3740,38 @@ class MainWindow(QMainWindow):
     def show_formula_explanation(self) -> None:
         QMessageBox.information(self, "四模式公式说明", FORMULA_EXPLANATION_TEXT)
 
+    def _selected_ledger_prefill(self) -> dict[str, Any] | None:
+        for mode_key, table in self.mode_tables.items():
+            selected_rows = table.selectionModel().selectedRows()
+            if not selected_rows:
+                continue
+            row_index = selected_rows[0].row()
+            rendered_rows = self.rendered_rows_by_mode.get(mode_key, [])
+            if row_index < 0 or row_index >= len(rendered_rows):
+                continue
+            mapping = LEDGER_PREFILL_QUOTE_FIELDS.get(mode_key)
+            if mapping is None:
+                continue
+            row = rendered_rows[row_index]
+            ledger_mode, spot_field, option_field = mapping
+            spot_code = str(row.get("spot_code") or row.get("pool", "")).split(".")[0]
+            return {
+                "mode": ledger_mode,
+                "etf_code": spot_code,
+                "option_code": str(row.get("option_code", "")),
+                "strike": float(row.get("strike", 0.0)),
+                "stock_price": float(row.get(spot_field, 0.0)),
+                "option_premium": round(float(row.get(option_field, 0.0)) * 10000, 2),
+                "stock_shares": 10000,
+                "option_contracts": 1,
+            }
+        return None
+
     def open_post_market_ledger(self) -> None:
         dialog = StrategyLedgerDialog(self.config_path.parent, self)
+        prefill = self._selected_ledger_prefill()
+        if prefill is not None:
+            dialog.apply_prefill(prefill)
         dialog.exec()
 
     def open_config_dialog(self) -> None:

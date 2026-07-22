@@ -13,8 +13,8 @@ or the scanner's live connection.
 - The button opens a `StrategyLedgerDialog` in the same process.
 - Keep the existing standalone `TradeLedger` source in the repository, but it
   is not required in the customer delivery folder.
-- Store ledger data beside `contracts_config.json`, under
-  `strategy_ledger_data` so packaged and source launches use a predictable
+- Store all ledger data in one `strategy_ledger.json` file beside
+  `contracts_config.json` so packaged and source launches use a predictable
   location.
 
 ## Manual Record
@@ -57,7 +57,8 @@ yuan per contract.
 - Provide an add/update form and a table with formula text for each saved
   record, so every result remains auditable.
 - Selecting a table row loads it for editing; deletion is explicit.
-- Save one JSON file per month as `strategy_ledger_data/YYYY-MM.json`.
+- Save every record in the single `strategy_ledger.json` file. The interface
+  filters and totals records by the selected month without splitting files.
 - Persist all input values, formula text and calculated result as a snapshot;
   later fee-default changes must not alter historical monthly results.
 

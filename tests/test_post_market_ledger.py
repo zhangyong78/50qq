@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from PyQt6.QtCore import QDate
 from PyQt6.QtWidgets import QApplication
 
 from post_market_ledger import (
@@ -104,19 +105,17 @@ class SettlementCalculationTests(unittest.TestCase):
 
 
 class StrategyLedgerStoreTests(unittest.TestCase):
-    def test_store_round_trips_one_month(self):
-        records = [{"id": "one", "result": 568.92}]
+    def test_store_round_trips_all_records_in_one_config_side_file(self):
+        records = [
+            {"id": "june", "settlement_date": "2026-06-24", "result": 568.92},
+            {"id": "july", "settlement_date": "2026-07-22", "result": 437.90},
+        ]
         with tempfile.TemporaryDirectory() as temp_dir:
             store = StrategyLedgerStore(Path(temp_dir))
-            store.save("2026-07", records)
+            store.save_all(records)
 
-            self.assertEqual(store.load("2026-07"), records)
-
-    def test_store_rejects_invalid_month(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = StrategyLedgerStore(Path(temp_dir))
-            with self.assertRaisesRegex(ValueError, "YYYY-MM"):
-                store.load("2026-7")
+            self.assertEqual(store.data_path, Path(temp_dir) / "strategy_ledger.json")
+            self.assertEqual(store.load_all(), records)
 
 
 class StrategyLedgerDialogTests(unittest.TestCase):
@@ -124,12 +123,20 @@ class StrategyLedgerDialogTests(unittest.TestCase):
     def setUpClass(cls):
         cls.application = QApplication.instance() or QApplication([])
 
-    def test_dialog_stores_monthly_records_beside_scanner_config(self):
+    def test_dialog_reads_selected_month_from_single_config_side_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_dir = Path(temp_dir)
+            StrategyLedgerStore(config_dir).save_all(
+                [
+                    {"id": "june", "settlement_date": "2026-06-24", "result": 10.0},
+                    {"id": "july", "settlement_date": "2026-07-22", "result": 20.0},
+                ]
+            )
             dialog = StrategyLedgerDialog(config_dir)
+            dialog.month_edit.setDate(QDate(2026, 7, 1))
 
-            self.assertEqual(dialog.store.data_dir, config_dir / "strategy_ledger_data")
+            self.assertEqual(dialog.store.data_path, config_dir / "strategy_ledger.json")
+            self.assertEqual(dialog.table.rowCount(), 1)
             self.assertTrue(dialog.month_total_label.text().startswith("本月已结算"))
 
     def test_passive_mode_disables_option_open_and_exercise_fees(self):
@@ -141,6 +148,30 @@ class StrategyLedgerDialogTests(unittest.TestCase):
             self.assertFalse(dialog.active_exercise_fee_spin.isEnabled())
             self.assertEqual(dialog.option_buy_open_fee_spin.value(), 0.0)
             self.assertEqual(dialog.active_exercise_fee_spin.value(), 0.0)
+
+    def test_prefill_updates_form_without_creating_a_record(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dialog = StrategyLedgerDialog(Path(temp_dir))
+
+            dialog.apply_prefill(
+                {
+                    "mode": "mode2",
+                    "etf_code": "510050",
+                    "option_code": "10011695.SH",
+                    "strike": 3.10,
+                    "stock_price": 3.09,
+                    "option_premium": 201.0,
+                    "stock_shares": 10000,
+                    "option_contracts": 1,
+                }
+            )
+
+            self.assertEqual(dialog.mode_combo.currentData(), "mode2")
+            self.assertEqual(dialog.etf_code_edit.text(), "510050")
+            self.assertEqual(dialog.stock_price_spin.value(), 3.09)
+            self.assertEqual(dialog.option_premium_spin.value(), 201.0)
+            self.assertEqual(dialog.table.rowCount(), 0)
+            self.assertEqual(dialog.save_button.text(), "新增记录")
 
 
 if __name__ == "__main__":
