@@ -45,6 +45,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from post_market_ledger import StrategyLedgerDialog
+
 
 CONFIG_FILE = "contracts_config.json"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
@@ -2917,16 +2919,25 @@ class MainWindow(QMainWindow):
         self.config_button.clicked.connect(self.open_config_dialog)
         self.formula_button = QPushButton("公式")
         self.formula_button.clicked.connect(self.show_formula_explanation)
+        self.post_market_button = QPushButton("盘后计算")
+        self.post_market_button.clicked.connect(self.open_post_market_ledger)
         self.reload_button = QPushButton("重载")
         self.reload_button.clicked.connect(self.reload_config)
         self.freeze_button = QPushButton("锁定")
         self.freeze_button.clicked.connect(self.toggle_freeze)
-        for button in (self.config_button, self.formula_button, self.reload_button, self.freeze_button):
+        for button in (
+            self.config_button,
+            self.formula_button,
+            self.post_market_button,
+            self.reload_button,
+            self.freeze_button,
+        ):
             button.setFixedHeight(24)
             button.setStyleSheet("font-size:11px; padding:0 8px;")
         toolbar.addWidget(self.sound_checkbox)
         toolbar.addWidget(self.config_button)
         toolbar.addWidget(self.formula_button)
+        toolbar.addWidget(self.post_market_button)
         toolbar.addWidget(self.reload_button)
         toolbar.addWidget(self.freeze_button)
 
@@ -3628,6 +3639,10 @@ class MainWindow(QMainWindow):
 
     def show_formula_explanation(self) -> None:
         QMessageBox.information(self, "四模式公式说明", FORMULA_EXPLANATION_TEXT)
+
+    def open_post_market_ledger(self) -> None:
+        dialog = StrategyLedgerDialog(self.config_path.parent, self)
+        dialog.exec()
 
     def open_config_dialog(self) -> None:
         dialog = ConfigDialog(
