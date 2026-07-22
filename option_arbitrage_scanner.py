@@ -632,6 +632,11 @@ def expiry_to_yyyymm(expiry: str) -> str:
     return digits[:6] if len(digits) >= 6 else ""
 
 
+def current_expiry_yyyymm() -> str:
+    """Return the only expiry month used by automatic option-chain scans."""
+    return time.strftime("%Y%m")
+
+
 def format_expiry_date(expire_date: str | None) -> str:
     digits = "".join(char for char in str(expire_date or "") if char.isdigit())
     if len(digits) >= 8:
@@ -1123,14 +1128,19 @@ def option_intrinsic_time_value(
 
 def option_moneyness_text(spot_price: float, strike: float, *, is_call: bool) -> str:
     if spot_price <= 0 or strike <= 0:
-        return "未知"
+        return "价格未知"
     epsilon = 0.001
     diff = spot_price - strike
     if abs(diff) <= epsilon:
-        return "近平值"
-    if is_call:
-        return "当前价内" if diff > 0 else "当前价外"
-    return "当前价内" if diff < 0 else "当前价外"
+        return "现价接近行权价"
+    return "现价高于行权价" if diff > 0 else "现价低于行权价"
+
+
+def option_is_in_the_money(spot_price: float, strike: float, *, is_call: bool) -> bool:
+    """Keep option-specific in-the-money logic independent from UI wording."""
+    if spot_price <= 0 or strike <= 0:
+        return False
+    return spot_price > strike if is_call else spot_price < strike
 
 
 def recommendation_effective_profit(row: dict[str, Any]) -> float:
@@ -1138,9 +1148,8 @@ def recommendation_effective_profit(row: dict[str, Any]) -> float:
     if bool(row.get("alert_eligible")):
         return profit
 
-    moneyness = str(row.get("moneyness_text", ""))
     upper_profit = row.get("exercise_upper_profit")
-    if moneyness == "当前价内" and upper_profit is not None:
+    if bool(row.get("is_in_the_money")) and upper_profit is not None:
         return float(upper_profit)
     return float("-inf")
 
@@ -1148,18 +1157,17 @@ def recommendation_effective_profit(row: dict[str, Any]) -> float:
 def recommendation_profit_label(row: dict[str, Any]) -> str:
     if bool(row.get("alert_eligible")):
         return "保底收益"
-    if str(row.get("moneyness_text", "")) == "当前价内" and row.get("exercise_upper_profit") is not None:
+    if bool(row.get("is_in_the_money")) and row.get("exercise_upper_profit") is not None:
         return "若被行权收益"
     return str(row.get("profit_type", ""))
 
 
 def recommendation_rank_key(row: dict[str, Any]) -> tuple[int, float, int, float]:
     effective_profit = recommendation_effective_profit(row)
-    moneyness = str(row.get("moneyness_text", ""))
     if effective_profit == float("-inf") or effective_profit <= 0:
         return (9, 0.0, 9, 0.0)
 
-    moneyness_priority = 0 if moneyness == "当前价内" else 1
+    moneyness_priority = 0 if bool(row.get("is_in_the_money")) else 1
     certainty_priority = 0 if bool(row.get("alert_eligible")) else 1
     return (moneyness_priority, -effective_profit, certainty_priority, -float(row.get("profit", 0.0)))
 
@@ -1391,11 +1399,7 @@ def pick_strike_ladder_for_underlying(
         _, download_err = run_with_timeout(xtdata.download_sector_data, QMT_SECTOR_DOWNLOAD_TIMEOUT_SEC)
         del download_err
 
-    month_filters: list[str] = []
-    if expiry_yyyymm:
-        month_filters.append(expiry_yyyymm)
-    if "" not in month_filters:
-        month_filters.append("")
+    month_filters = [expiry_yyyymm or current_expiry_yyyymm()]
 
     max_tiers = max(0, int(max_tiers))
     for month_filter in month_filters:
@@ -1445,11 +1449,7 @@ def pick_atm_for_underlying(spot_code: str, spot_price: float, expiry_yyyymm: st
         _, download_err = run_with_timeout(xtdata.download_sector_data, QMT_SECTOR_DOWNLOAD_TIMEOUT_SEC)
         del download_err
 
-    month_filters: list[str] = []
-    if expiry_yyyymm:
-        month_filters.append(expiry_yyyymm)
-    if "" not in month_filters:
-        month_filters.append("")
+    month_filters = [expiry_yyyymm or current_expiry_yyyymm()]
 
     for month_filter in month_filters:
         calls_by_strike, puts_by_strike, expiry_by_strike = _gather_option_strike_pairs(
@@ -1609,7 +1609,7 @@ def resolve_atm_pairs(
         if spot_price <= 0:
             continue
 
-        yyyymm = expiry_to_yyyymm(template.expiry)
+        yyyymm = current_expiry_yyyymm()
         ladder = pick_strike_ladder_for_underlying(
             template.spot_code,
             spot_price,
@@ -2095,6 +2095,11 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 float(item["option_mid"]),
                 is_call=bool(item["is_call"]),
             )
+            is_in_the_money = option_is_in_the_money(
+                spot_mid,
+                pair.strike,
+                is_call=bool(item["is_call"]),
+            )
             moneyness = option_moneyness_text(spot_mid, pair.strike, is_call=bool(item["is_call"]))
             rows.append(
                 {
@@ -2111,6 +2116,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                     "profit": profit,
                     "profit_type": item["profit_type"],
                     "alert_eligible": bool(item["alert_eligible"]),
+                    "is_in_the_money": is_in_the_money,
                     "moneyness_text": moneyness,
                     "exercise_upper_profit": item.get("exercise_upper_profit"),
                     "spot_bid": spot.bid1,
@@ -3330,7 +3336,7 @@ class MainWindow(QMainWindow):
             f" 黄色阈值 >= {self.fees.yellow_threshold:.2f} 元，"
             f" 红色/声音阈值 >= {self.fees.red_threshold:.2f} 元，"
             f" 当前声音报警：{sound_text}。"
-            " 红黄高亮：保底收益始终参与；条件结构在当前价内时按若被行权收益参与高亮。"
+            " 红黄高亮：保底收益始终参与；条件结构在符合行权方向时按若被行权收益参与高亮。"
         )
 
     def _update_recommendations(self, rows: list[dict[str, Any]]) -> None:
@@ -3382,7 +3388,7 @@ class MainWindow(QMainWindow):
                 f"公式：{self._recommendation_formula_text(row)}"
             )
         if any(not bool(row.get("alert_eligible")) for row in picks):
-            lines.append("说明：条件结构仅在当前价内时，按若被行权收益参与推荐排序。")
+            lines.append("说明：条件结构仅在符合行权方向时，按若被行权收益参与推荐排序。")
         return "\n".join(lines)
 
     def _recommendation_formula_text(self, row: dict[str, Any]) -> str:
@@ -3519,7 +3525,7 @@ class MainWindow(QMainWindow):
                         row.get("exercise_upper_profit"),
                         highlight_eligible=(
                             not bool(row.get("alert_eligible"))
-                            and str(row.get("moneyness_text", "")) == "当前价内"
+                            and bool(row.get("is_in_the_money"))
                         ),
                     )
                 if column == self._TIME_VALUE_COLUMN and float(row["time_value"]) < 0:
@@ -3591,9 +3597,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _apply_moneyness_style(item: QTableWidgetItem, text: str) -> None:
-        if text == "当前价内":
+        if text == "现价低于行权价":
             item.setForeground(QColor("#b54708"))
-        elif text == "当前价外":
+        elif text == "现价高于行权价":
             item.setForeground(QColor("#555555"))
 
     def toggle_freeze(self) -> None:
