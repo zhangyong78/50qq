@@ -1132,8 +1132,8 @@ def option_moneyness_text(spot_price: float, strike: float, *, is_call: bool) ->
     epsilon = 0.001
     diff = spot_price - strike
     if abs(diff) <= epsilon:
-        return "现价接近行权价"
-    return "现价高于行权价" if diff > 0 else "现价低于行权价"
+        return "行权价接近现价"
+    return "行权价低于现价" if diff > 0 else "行权价高于现价"
 
 
 def option_is_in_the_money(spot_price: float, strike: float, *, is_call: bool) -> bool:
@@ -1170,6 +1170,11 @@ def recommendation_rank_key(row: dict[str, Any]) -> tuple[int, float, int, float
     moneyness_priority = 0 if bool(row.get("is_in_the_money")) else 1
     certainty_priority = 0 if bool(row.get("alert_eligible")) else 1
     return (moneyness_priority, -effective_profit, certainty_priority, -float(row.get("profit", 0.0)))
+
+
+def sort_mode_rows_by_strike(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Order mode-table rows by numeric strike without affecting recommendations."""
+    return sorted(rows, key=lambda row: (float(row.get("strike", 0.0)), str(row.get("option_code", ""))))
 
 
 def build_recommendations(rows: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
@@ -3475,8 +3480,7 @@ class MainWindow(QMainWindow):
             for row in self._display_filtered_rows(rows)
             if row.get("mode_key") == mode_key
         ]
-        filtered.sort(key=lambda row: (int(row.get("atm_tier", 0)), -float(row["profit"])))
-        return filtered
+        return sort_mode_rows_by_strike(filtered)
 
     def render_rows(self, rows: list[dict[str, Any]]) -> None:
         for mode_key, _, _ in ARBITRAGE_MODE_DEFS:
@@ -3597,9 +3601,9 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _apply_moneyness_style(item: QTableWidgetItem, text: str) -> None:
-        if text == "现价低于行权价":
+        if text == "行权价低于现价":
             item.setForeground(QColor("#b54708"))
-        elif text == "现价高于行权价":
+        elif text == "行权价高于现价":
             item.setForeground(QColor("#555555"))
 
     def toggle_freeze(self) -> None:

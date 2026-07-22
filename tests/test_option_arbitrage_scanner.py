@@ -6,6 +6,7 @@ from option_arbitrage_scanner import (
     option_moneyness_text,
     pick_atm_for_underlying,
     recommendation_effective_profit,
+    sort_mode_rows_by_strike,
 )
 
 
@@ -25,9 +26,21 @@ class ExpiryAndMoneynessTests(unittest.TestCase):
         self.assertEqual(gather_pairs.call_args_list[0].args[2], "202607")
 
     def test_display_uses_direct_price_relation(self):
-        self.assertEqual(option_moneyness_text(3.075, 3.10, is_call=False), "现价低于行权价")
-        self.assertEqual(option_moneyness_text(3.075, 3.00, is_call=True), "现价高于行权价")
-        self.assertEqual(option_moneyness_text(3.075, 3.0754, is_call=True), "现价接近行权价")
+        self.assertEqual(option_moneyness_text(3.075, 3.10, is_call=False), "行权价高于现价")
+        self.assertEqual(option_moneyness_text(3.075, 3.00, is_call=True), "行权价低于现价")
+        self.assertEqual(option_moneyness_text(3.075, 3.0754, is_call=True), "行权价接近现价")
+
+    def test_mode_rows_sort_by_numeric_strike_then_option_code(self):
+        rows = [
+            {"strike": 3.20, "option_code": "B.SH"},
+            {"strike": 3.00, "option_code": "C.SH"},
+            {"strike": 3.20, "option_code": "A.SH"},
+        ]
+
+        self.assertEqual(
+            [row["option_code"] for row in sort_mode_rows_by_strike(rows)],
+            ["C.SH", "A.SH", "B.SH"],
+        )
 
     def test_conditional_recommendation_uses_boolean_not_display_text(self):
         row = {
