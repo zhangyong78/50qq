@@ -347,7 +347,16 @@ def option_pair_is_adjusted(xtdata: Any, call_code: str, put_code: str, *, spot_
     return False
 
 
-def strike_distance_tier(strike: float, ref_atm_strike: float, spot_code: str) -> int:
+def strike_distance_tier(
+    strike: float,
+    ref_atm_strike: float,
+    spot_code: str,
+    listed_strikes: list[float] | None = None,
+) -> int:
+    if listed_strikes:
+        index_by_strike = {value: index for index, value in enumerate(listed_strikes)}
+        if strike in index_by_strike and ref_atm_strike in index_by_strike:
+            return abs(index_by_strike[strike] - index_by_strike[ref_atm_strike])
     step = option_strike_step(spot_code)
     if step <= 0 or ref_atm_strike <= 0:
         return 0
@@ -1216,6 +1225,29 @@ def sort_mode_rows_by_strike(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
     return sorted(rows, key=lambda row: (float(row.get("strike", 0.0)), str(row.get("option_code", ""))))
 
 
+def select_atm_pairs_for_status(pairs: list[OptionPair]) -> list[OptionPair]:
+    """Keep one actual ATM pair per underlying for the status summary."""
+    selected: dict[str, OptionPair] = {}
+    for pair in pairs:
+        current = selected.get(pair.spot_code)
+        if current is None:
+            selected[pair.spot_code] = pair
+            continue
+        current_rank = (
+            0 if current.atm_tier == 0 else 1,
+            abs(current.strike - current.ref_atm_strike) if current.ref_atm_strike > 0 else 0.0,
+            current.strike,
+        )
+        candidate_rank = (
+            0 if pair.atm_tier == 0 else 1,
+            abs(pair.strike - pair.ref_atm_strike) if pair.ref_atm_strike > 0 else 0.0,
+            pair.strike,
+        )
+        if candidate_rank < current_rank:
+            selected[pair.spot_code] = pair
+    return [selected[spot_code] for spot_code in sorted(selected)]
+
+
 def build_recommendations(rows: list[dict[str, Any]], limit: int = 3) -> list[dict[str, Any]]:
     max_count = max(0, int(limit))
     if max_count == 0:
@@ -1459,7 +1491,7 @@ def pick_strike_ladder_for_underlying(
         ref_atm_strike = min(common, key=lambda strike: abs(strike - spot_price))
         ladder: list[tuple[str, str, float, str, int, float]] = []
         for strike in common:
-            tier = strike_distance_tier(strike, ref_atm_strike, spot_code)
+            tier = strike_distance_tier(strike, ref_atm_strike, spot_code, common)
             if tier > max_tiers:
                 continue
             call_code = normalize_market_code(calls_by_strike[strike])
@@ -1764,12 +1796,14 @@ def build_market_status(
         spots[code] = {
             "bid": tick.bid1 if tick else None,
             "ask": tick.ask1 if tick else None,
+            "price": spot_reference_price(tick, code) if tick else None,
             "ok": tick is not None,
         }
 
     display_pairs = pairs if pairs else pairs_from_templates(templates)
+    status_pairs = select_atm_pairs_for_status(display_pairs)
     contracts: dict[str, Any] = {}
-    for pair in display_pairs:
+    for pair in status_pairs:
         contracts[pair.spot_code] = {
             "pool": pair.pool_name,
             "strike": pair.strike,
@@ -1895,7 +1929,8 @@ def format_contract_targets_text(status: dict[str, Any]) -> str:
 
 CONTRACT_TABLE_HEADERS = [
     "品种",
-    "现货",
+    "现货代码",
+    "现货实时价",
     "行权价",
     "到期",
     "认购",
@@ -3298,13 +3333,8 @@ class MainWindow(QMainWindow):
             put_code = str(info.get("put") or "-")
             expiry = str(info.get("expiry") or "-")
             spot_quote = status.get("spots", {}).get(spot_code, {})
-            if spot_quote.get("ok"):
-                spot_text = (
-                    f"{first_number(spot_quote.get('bid')):.4f}"
-                    f" / {first_number(spot_quote.get('ask')):.4f}"
-                )
-            else:
-                spot_text = "无行情"
+            spot_price = first_number(spot_quote.get("price"))
+            spot_price_text = f"{spot_price:.4f}" if spot_price > 0 else "无行情"
             if info.get("atm_pending"):
                 call_status = str(info.get("chain_error") or "待自动平值")
                 put_status = ""
@@ -3312,14 +3342,24 @@ class MainWindow(QMainWindow):
                 call_status = _quote_status_text(bool(info.get("call_ok")))
                 put_status = _quote_status_text(bool(info.get("put_ok")))
 
-            values = [pool, short_code, strike_text, expiry, call_code, put_code, call_status, put_status]
+            values = [
+                pool,
+                short_code,
+                spot_price_text,
+                strike_text,
+                expiry,
+                call_code,
+                put_code,
+                call_status,
+                put_status,
+            ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                if column in {2}:
+                if column in {2, 3}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if column == 6 and not info.get("atm_pending"):
-                    _apply_table_status_item(item, bool(info.get("call_ok")))
                 if column == 7 and not info.get("atm_pending"):
+                    _apply_table_status_item(item, bool(info.get("call_ok")))
+                if column == 8 and not info.get("atm_pending"):
                     _apply_table_status_item(item, bool(info.get("put_ok")))
                 if column == 1 and not spot_quote.get("ok"):
                     item.setForeground(QColor("#c62828"))
