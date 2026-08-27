@@ -3,20 +3,58 @@ from unittest.mock import patch
 
 from option_arbitrage_scanner import (
     MainWindow,
+    MODE_TIME_VALUE_REQUIREMENTS,
     OptionPair,
     Tick,
     build_market_status,
     current_expiry_yyyymm,
+    default_fee_config,
+    ARBITRAGE_MODE_DEFS,
     option_exercise_status_text,
     option_moneyness_text,
     pick_atm_for_underlying,
     recommendation_effective_profit,
+    recommendation_guidance_html,
+    recommendation_guidance_text,
     strike_distance_tier,
     sort_mode_rows_by_strike,
 )
 
 
 class ExpiryAndMoneynessTests(unittest.TestCase):
+    def test_mode_titles_show_expected_time_value_direction(self):
+        self.assertEqual(MODE_TIME_VALUE_REQUIREMENTS["模式1"], "时间价值需为负数")
+        self.assertEqual(MODE_TIME_VALUE_REQUIREMENTS["模式4"], "时间价值需为负数")
+        self.assertEqual(MODE_TIME_VALUE_REQUIREMENTS["模式2"], "时间价值需为正数")
+        self.assertEqual(MODE_TIME_VALUE_REQUIREMENTS["模式3"], "时间价值需为正数")
+
+    def test_default_stock_commission_is_one_basis_point(self):
+        self.assertEqual(default_fee_config()["stock_commission_rate"], 0.0001)
+
+    def test_recommendation_guidance_contains_time_value_rules(self):
+        guidance = recommendation_guidance_text([])
+        self.assertIn("买入认沽/买入认购（模式1、4）通常优先选择时间价值为负", guidance)
+        self.assertIn("卖出认沽/卖出认购（模式2、3）通常优先选择时间价值为正", guidance)
+
+    def test_recommendation_guidance_flags_high_active_call_return(self):
+        guidance = recommendation_guidance_text(
+            [
+                {
+                    "mode_key": "模式4",
+                    "is_in_the_money": True,
+                    "time_value": -0.005,
+                    "profit": 72.35,
+                }
+            ]
+        )
+        self.assertIn("模式4买入认购主动行权口径约 72.35 元/张", guidance)
+        self.assertIn("优先核对主动行权条件", guidance)
+
+    def test_recommendation_guidance_marks_active_exercise_lines_red(self):
+        guidance_html = recommendation_guidance_html([])
+        self.assertIn('color:#b91c1c;font-weight:600;', guidance_html)
+        self.assertIn("主动行权提示", guidance_html)
+
     def test_profit_column_explicitly_states_unexercised_assumption(self):
         self.assertEqual(MainWindow.MODE_TABLE_HEADERS[4], "未被行权每张收益(元)")
 

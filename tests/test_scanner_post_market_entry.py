@@ -14,8 +14,8 @@ class PostMarketLedgerEntryTests(unittest.TestCase):
         cls.application = QApplication.instance() or QApplication([])
 
     def test_window_title_includes_release_version(self):
-        self.assertEqual(APP_VERSION, "V2026.08.26")
-        self.assertEqual(APP_WINDOW_TITLE, "A股ETF期权交割套利机会扫描器 V2026.08.26")
+        self.assertEqual(APP_VERSION, "V2026.08.27")
+        self.assertEqual(APP_WINDOW_TITLE, "A股ETF期权交割套利机会扫描器 V2026.08.27")
 
     @patch("option_arbitrage_scanner.StrategyLedgerDialog")
     @patch.object(MainWindow, "_start_worker")

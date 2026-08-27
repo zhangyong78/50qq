@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+from html import escape
 import json
 import math
 import os
@@ -49,7 +50,7 @@ from post_market_ledger import StrategyLedgerDialog
 
 
 CONFIG_FILE = "contracts_config.json"
-APP_VERSION = "V2026.08.26"
+APP_VERSION = "V2026.08.27"
 APP_WINDOW_TITLE = f"A股ETF期权交割套利机会扫描器 {APP_VERSION}"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
 QMT_CONNECT_TIMEOUT_SEC = 4.0
@@ -78,6 +79,13 @@ ARBITRAGE_MODE_DEFS: list[tuple[str, str, str]] = [
         "持有现货+卖出认购；被动行权提供现货。",
     ),
 ]
+
+MODE_TIME_VALUE_REQUIREMENTS = {
+    "模式1": "时间价值需为负数",
+    "模式2": "时间价值需为正数",
+    "模式3": "时间价值需为正数",
+    "模式4": "时间价值需为负数",
+}
 
 LEDGER_PREFILL_QUOTE_FIELDS = {
     "模式1": ("mode1", "spot_ask", "option_ask"),
@@ -126,7 +134,7 @@ def default_fee_config() -> dict[str, Any]:
         "multiplier": 10000,
         "option_open_fee": 1.7,
         "option_exercise_fee": 4.0,
-        "stock_commission_rate": 0.0002,
+        "stock_commission_rate": 0.0001,
         "stock_borrow_cost": 0.0,
         "yellow_threshold": 20.0,
         "red_threshold": 50.0,
@@ -1261,6 +1269,47 @@ def build_recommendations(rows: list[dict[str, Any]], limit: int = 3) -> list[di
     ]
     candidates.sort(key=recommendation_rank_key)
     return candidates[:max_count]
+
+
+def recommendation_guidance_text(rows: list[dict[str, Any]]) -> str:
+    """Return concise trading heuristics and any current active-call reminder."""
+    lines = [
+        "交易提示：买入认沽/买入认购（模式1、4）通常优先选择时间价值为负；"
+        "卖出认沽/卖出认购（模式2、3）通常优先选择时间价值为正。仅作筛选参考，不是绝对条件。",
+        "经验提醒：模式1、4买入期权，实值时需要主动行权；模式2、3卖出期权，实值时才可能被对手行权。",
+        "主动行权提示：模式4买入认购若实值且时间价值为负，主动行权收益可能明显高于不行权结果，"
+        "达到约70元/张时优先核对主动行权条件。",
+    ]
+
+    high_return_calls = [
+        row
+        for row in rows
+        if str(row.get("mode_key", "")) == "模式4"
+        and bool(row.get("is_in_the_money"))
+        and float(row.get("time_value", 0.0)) < 0
+        and float(row.get("profit", 0.0)) >= 70.0
+    ]
+    if high_return_calls:
+        best = max(high_return_calls, key=lambda row: float(row.get("profit", 0.0)))
+        lines.append(
+            "当前提醒：模式4买入认购主动行权口径约 "
+            f"{float(best.get('profit', 0.0)):.2f} 元/张，优先核对主动行权条件。"
+        )
+    return "\n".join(lines)
+
+
+def recommendation_guidance_html(rows: list[dict[str, Any]]) -> str:
+    """Render guidance with red emphasis for active-exercise reminders."""
+    rendered_lines = []
+    for line in recommendation_guidance_text(rows).splitlines():
+        is_active_exercise = line.startswith(("主动行权提示", "当前提醒"))
+        if is_active_exercise:
+            rendered_lines.append(
+                f'<span style="color:#b91c1c;font-weight:600;">{escape(line)}</span>'
+            )
+        else:
+            rendered_lines.append(f'<span style="color:#174a72;">{escape(line)}</span>')
+    return "<br>".join(rendered_lines)
 
 
 FORMULA_EXPLANATION_TEXT = """
@@ -2753,7 +2802,7 @@ class ConfigDialog(QDialog):
         self.multiplier_spin.setValue(int(fees.get("multiplier", 10000)))
         self.option_open_fee_spin.setValue(float(fees.get("option_open_fee", 1.7)))
         self.option_exercise_fee_spin.setValue(float(fees.get("option_exercise_fee", 4.0)))
-        self.stock_commission_rate_spin.setValue(float(fees.get("stock_commission_rate", 0.0002)))
+        self.stock_commission_rate_spin.setValue(float(fees.get("stock_commission_rate", 0.0001)))
         self.stock_borrow_cost_spin.setValue(float(fees.get("stock_borrow_cost", 0.0)))
         self.yellow_threshold_spin.setValue(float(fees.get("yellow_threshold", 20.0)))
         self.red_threshold_spin.setValue(float(fees.get("red_threshold", 50.0)))
@@ -3113,6 +3162,16 @@ class MainWindow(QMainWindow):
             "border:1px solid #cfe8d6; font-size:12px;"
         )
         recommend_layout.addWidget(self.recommendation_label)
+        self.recommendation_guidance_label = QLabel(
+            "交易提示：等待行情与收益计算后显示时间价值和主动行权提醒。"
+        )
+        self.recommendation_guidance_label.setTextFormat(Qt.TextFormat.RichText)
+        self.recommendation_guidance_label.setWordWrap(True)
+        self.recommendation_guidance_label.setStyleSheet(
+            "background:#eef6ff; color:#174a72; padding:5px 8px; border-radius:4px;"
+            "border:1px solid #c9def2; font-size:11px;"
+        )
+        recommend_layout.addWidget(self.recommendation_guidance_label)
         layout.addWidget(recommend_box)
 
         filtered_recommend_box = QGroupBox("当前筛选推荐", self)
@@ -3179,6 +3238,12 @@ class MainWindow(QMainWindow):
             box_layout = QVBoxLayout(box)
             box_layout.setContentsMargins(8, 8, 8, 8)
             box_layout.setSpacing(6)
+
+            time_value_requirement = QLabel(MODE_TIME_VALUE_REQUIREMENTS[mode_key], box)
+            time_value_requirement.setStyleSheet(
+                "color:#d90429; font-weight:600; font-size:11px; padding:0 2px;"
+            )
+            box_layout.addWidget(time_value_requirement)
 
             table = QTableWidget(0, len(self.MODE_TABLE_HEADERS), box)
             table.setHorizontalHeaderLabels(self.MODE_TABLE_HEADERS)
@@ -3273,6 +3338,9 @@ class MainWindow(QMainWindow):
         self._update_market_panel({"spots": {}, "contracts": {}, "option_total": 0, "option_ok": 0, "error": ""})
         self._sync_contract_table_height()
         self.recommendation_label.setText("推荐1-3：等待行情与收益计算，默认优先展示保底收益机会。")
+        self.recommendation_guidance_label.setText(
+            "交易提示：等待行情与收益计算后显示时间价值和主动行权提醒。"
+        )
         self.filtered_recommendation_label.setText("等待下方品种筛选与行情联动。")
         self.on_status_ready("正在重新连接 QMT...", False)
         self._start_worker()
@@ -3464,6 +3532,7 @@ class MainWindow(QMainWindow):
                 empty_text="推荐1-3：当前没有可直接下手的正收益候选，建议继续等待盘口变化。",
             )
         )
+        self.recommendation_guidance_label.setText(recommendation_guidance_html(rows))
 
         selected_pools = sorted(self._selected_pool_names())
         pool_hint = "、".join(selected_pools) if selected_pools else "未勾选品种"
