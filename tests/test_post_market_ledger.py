@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from PyQt6.QtCore import QDate
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel
 
 from post_market_ledger import (
     StrategyLedgerDialog,
@@ -123,7 +123,7 @@ class StrategyLedgerDialogTests(unittest.TestCase):
     def setUpClass(cls):
         cls.application = QApplication.instance() or QApplication([])
 
-    def test_dialog_reads_selected_month_from_single_config_side_file(self):
+    def test_dialog_shows_all_records_while_month_is_used_for_data_entry(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_dir = Path(temp_dir)
             StrategyLedgerStore(config_dir).save_all(
@@ -136,18 +136,36 @@ class StrategyLedgerDialogTests(unittest.TestCase):
             dialog.month_edit.setDate(QDate(2026, 7, 1))
 
             self.assertEqual(dialog.store.data_path, config_dir / "strategy_ledger.json")
-            self.assertEqual(dialog.table.rowCount(), 1)
-            self.assertTrue(dialog.month_total_label.text().startswith("本月已结算"))
+            self.assertEqual(dialog.table.rowCount(), 2)
+            self.assertTrue(dialog.month_total_label.text().startswith("账本累计"))
+            self.assertEqual(dialog.settlement_date_edit.date().toString("yyyy-MM"), "2026-07")
 
-    def test_passive_mode_disables_option_open_and_exercise_fees(self):
+    def test_form_defaults_and_auto_stock_shares_follow_contracts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dialog = StrategyLedgerDialog(Path(temp_dir))
+            dialog.option_contracts_spin.setValue(3)
+
+            self.assertEqual(dialog.stock_shares, 30000)
+            self.assertEqual(dialog.strike_spin.value(), 1.0)
+            self.assertEqual(dialog.stock_price_spin.value(), 1.0)
+            self.assertEqual(dialog.option_premium_spin.value(), 1.0)
+            self.assertEqual(dialog.stock_commission_rate, 0.0001)
+            self.assertEqual(dialog.option_buy_open_fee, 1.7)
+            self.assertEqual(dialog.active_exercise_fee, 4.0)
+            self.assertFalse(
+                any("融券/资金成本" in label.text() for label in dialog.findChildren(QLabel))
+            )
+
+    def test_passive_mode_does_not_charge_option_open_and_exercise_fees(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             dialog = StrategyLedgerDialog(Path(temp_dir))
             dialog.mode_combo.setCurrentIndex(1)
+            record = dialog._record_from_form()
 
-            self.assertFalse(dialog.option_buy_open_fee_spin.isEnabled())
-            self.assertFalse(dialog.active_exercise_fee_spin.isEnabled())
-            self.assertEqual(dialog.option_buy_open_fee_spin.value(), 0.0)
-            self.assertEqual(dialog.active_exercise_fee_spin.value(), 0.0)
+            self.assertIsNotNone(record)
+            self.assertEqual(record["option_buy_open_fee"], 0.0)
+            self.assertEqual(record["active_exercise_fee"], 0.0)
+            self.assertNotIn("borrow_cost", record)
 
     def test_prefill_updates_form_without_creating_a_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:

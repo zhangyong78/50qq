@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QGridLayout,
     QGroupBox,
@@ -28,6 +29,12 @@ from PyQt6.QtWidgets import (
 )
 
 OPTION_MULTIPLIER = 10000
+DEFAULT_STRIKE = 1.0
+DEFAULT_STOCK_PRICE = 1.0
+DEFAULT_OPTION_PREMIUM = 1.0
+DEFAULT_STOCK_COMMISSION_RATE = 0.0001
+DEFAULT_OPTION_BUY_OPEN_FEE = 1.7
+DEFAULT_ACTIVE_EXERCISE_FEE = 4.0
 VALID_MODES = frozenset({"mode1", "mode2", "mode3", "mode4"})
 MODE_LABELS = {
     "mode1": "模式1：买入认沽 + 买入现货",
@@ -208,8 +215,9 @@ class StrategyLedgerDialog(QDialog):
         self.editing_record_id: str | None = None
         self.setWindowTitle("盘后策略账本")
         self.resize(1480, 760)
+        self.setMinimumSize(760, 560)
         self._build_ui()
-        self.load_selected_month()
+        self.load_all_records()
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
@@ -217,13 +225,7 @@ class StrategyLedgerDialog(QDialog):
         layout.setSpacing(8)
 
         summary_layout = QHBoxLayout()
-        summary_layout.addWidget(QLabel("账本月份："))
-        self.month_edit = QDateEdit(QDate.currentDate(), self)
-        self.month_edit.setDisplayFormat("yyyy-MM")
-        self.month_edit.setCalendarPopup(True)
-        self.month_edit.dateChanged.connect(self.load_selected_month)
-        summary_layout.addWidget(self.month_edit)
-        self.month_total_label = QLabel("本月已结算利润：¥0.00")
+        self.month_total_label = QLabel("账本累计利润：¥0.00")
         self.month_total_label.setStyleSheet(
             "font-size:18px; font-weight:600; color:#006b5b; padding:4px 12px;"
             "background:#eefaf7; border:1px solid #b9e3d9; border-radius:4px;"
@@ -244,55 +246,63 @@ class StrategyLedgerDialog(QDialog):
         for mode, label in MODE_LABELS.items():
             self.mode_combo.addItem(label, mode)
         self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self.month_edit = QDateEdit(QDate.currentDate(), self)
+        self.month_edit.setDisplayFormat("yyyy-MM")
+        self.month_edit.setCalendarPopup(True)
         self.settlement_date_edit = QDateEdit(QDate.currentDate(), self)
         self.settlement_date_edit.setDisplayFormat("yyyy-MM-dd")
         self.settlement_date_edit.setCalendarPopup(True)
+        self.month_edit.dateChanged.connect(self._on_month_changed)
         self.etf_code_edit = QLineEdit("510050", self)
         self.option_code_edit = QLineEdit(self)
         self.option_code_edit.setPlaceholderText("如 100xxxx.SH")
         self.strike_spin = self._money_spin(4, 100.0)
-        self.stock_shares_spin = QSpinBox(self)
-        self.stock_shares_spin.setRange(1, 100000000)
-        self.stock_shares_spin.setSingleStep(10000)
-        self.stock_shares_spin.setValue(10000)
+        self.strike_spin.setValue(DEFAULT_STRIKE)
+        self.stock_shares = OPTION_MULTIPLIER
         self.stock_price_label = QLabel("现货买入价")
         self.stock_price_spin = self._money_spin(6, 10000.0)
+        self.stock_price_spin.setValue(DEFAULT_STOCK_PRICE)
         self.option_contracts_spin = QSpinBox(self)
         self.option_contracts_spin.setRange(1, 10000)
         self.option_contracts_spin.setValue(1)
+        self.option_contracts_spin.valueChanged.connect(self._sync_stock_shares)
         self.option_premium_label = QLabel("认沽买入权利金(元/张)")
         self.option_premium_spin = self._money_spin(2, 1000000.0)
-        self.commission_spin = self._money_spin(6, 1.0)
-        self.commission_spin.setValue(0.0001)
-        self.option_buy_open_fee_spin = self._money_spin(2, 10000.0)
-        self.option_buy_open_fee_spin.setValue(2.0)
-        self.active_exercise_fee_spin = self._money_spin(2, 10000.0)
-        self.active_exercise_fee_spin.setValue(4.0)
-        self.borrow_cost_spin = self._money_spin(2, 10000000.0)
+        self.option_premium_spin.setValue(DEFAULT_OPTION_PREMIUM)
+        self.stock_commission_rate = DEFAULT_STOCK_COMMISSION_RATE
+        self.option_buy_open_fee = DEFAULT_OPTION_BUY_OPEN_FEE
+        self.active_exercise_fee = DEFAULT_ACTIVE_EXERCISE_FEE
+        self.legacy_borrow_cost = 0.0
         self.note_edit = QLineEdit(self)
         self.note_edit.setPlaceholderText("可选备注")
 
         fields = [
             ("策略模式", self.mode_combo),
+            ("账本月份", self.month_edit),
             ("结算日期", self.settlement_date_edit),
             ("ETF代码", self.etf_code_edit),
             ("期权代码", self.option_code_edit),
             ("行权价", self.strike_spin),
-            ("现货股数", self.stock_shares_spin),
             (self.stock_price_label, self.stock_price_spin),
             ("期权张数", self.option_contracts_spin),
             (self.option_premium_label, self.option_premium_spin),
-            ("现货佣金率", self.commission_spin),
-            ("买入开仓费(元/张)", self.option_buy_open_fee_spin),
-            ("主动行权费(元/张)", self.active_exercise_fee_spin),
-            ("融券/资金成本(元)", self.borrow_cost_spin),
             ("备注", self.note_edit),
         ]
         for index, (label, widget) in enumerate(fields):
-            row = index // 4
-            column = (index % 4) * 2
+            row = index // 2
+            column = (index % 2) * 2
             form.addWidget(label if isinstance(label, QLabel) else QLabel(label), row, column)
             form.addWidget(widget, row, column + 1)
+        form.setColumnStretch(1, 1)
+        form.setColumnStretch(3, 1)
+
+        self.fee_summary_label = QLabel(self)
+        self.fee_summary_label.setWordWrap(True)
+        self.fee_summary_label.setStyleSheet("color:#666666; font-size:11px;")
+        self.fee_config_button = QPushButton("费用配置…", self)
+        self.fee_config_button.clicked.connect(self.open_fee_configuration)
+        form.addWidget(self.fee_summary_label, 5, 0, 1, 3)
+        form.addWidget(self.fee_config_button, 5, 3)
 
         self.save_button = QPushButton("新增记录", self)
         self.save_button.clicked.connect(self.save_form_record)
@@ -302,12 +312,12 @@ class StrategyLedgerDialog(QDialog):
         self.delete_button.clicked.connect(self.delete_selected_record)
         self.save_button.setStyleSheet("background:#007f72; color:white; font-weight:600; padding:5px 12px;")
         self.delete_button.setStyleSheet("background:#b42318; color:white; padding:5px 12px;")
-        form.addWidget(self.save_button, 4, 5)
-        form.addWidget(self.clear_button, 4, 6)
-        form.addWidget(self.delete_button, 4, 7)
+        form.addWidget(self.save_button, 6, 1)
+        form.addWidget(self.clear_button, 6, 2)
+        form.addWidget(self.delete_button, 6, 3)
         layout.addWidget(form_box)
 
-        self.status_label = QLabel("所有记录按已行权或被指派的实际结果结算。")
+        self.status_label = QLabel("显示全部记录；账本月份仅用于录入时约束结算日期。")
         self.status_label.setStyleSheet("color:#555555;")
         layout.addWidget(self.status_label)
 
@@ -340,6 +350,19 @@ class StrategyLedgerDialog(QDialog):
     def _mode(self) -> str:
         return str(self.mode_combo.currentData())
 
+    def _sync_stock_shares(self, contracts: int | None = None) -> None:
+        if contracts is None:
+            contracts = self.option_contracts_spin.value()
+        self.stock_shares = contracts * OPTION_MULTIPLIER
+
+    def _on_month_changed(self) -> None:
+        selected_month = self.month_edit.date()
+        current_date = self.settlement_date_edit.date()
+        settlement_day = min(current_date.day(), selected_month.daysInMonth())
+        self.settlement_date_edit.setDate(
+            QDate(selected_month.year(), selected_month.month(), settlement_day)
+        )
+
     def _on_mode_changed(self) -> None:
         mode = self._mode()
         labels = {
@@ -351,28 +374,72 @@ class StrategyLedgerDialog(QDialog):
         stock_label, premium_label = labels[mode]
         self.stock_price_label.setText(stock_label)
         self.option_premium_label.setText(premium_label)
-        passive = mode in PASSIVE_SETTLEMENT_MODES
-        self.option_buy_open_fee_spin.setEnabled(not passive)
-        self.active_exercise_fee_spin.setEnabled(not passive)
-        if passive:
-            self.option_buy_open_fee_spin.setValue(0.0)
-            self.active_exercise_fee_spin.setValue(0.0)
-        else:
-            if self.option_buy_open_fee_spin.value() == 0.0:
-                self.option_buy_open_fee_spin.setValue(2.0)
-            if self.active_exercise_fee_spin.value() == 0.0:
-                self.active_exercise_fee_spin.setValue(4.0)
+        self._update_fee_summary()
 
-    def load_selected_month(self) -> None:
+    def _update_fee_summary(self) -> None:
+        base_text = (
+            f"自动：每张期权对应 {OPTION_MULTIPLIER:,} 股；"
+            f"现货佣金率 {self.stock_commission_rate:.6f}。"
+        )
+        if self._mode() in PASSIVE_SETTLEMENT_MODES:
+            self.fee_summary_label.setText(
+                f"{base_text} 当前为被动指派模式，不计买入开仓费和主动行权费。"
+            )
+        else:
+            self.fee_summary_label.setText(
+                f"{base_text} 买入开仓费 {self.option_buy_open_fee:.2f} 元/张，"
+                f"主动行权费 {self.active_exercise_fee:.2f} 元/张。"
+            )
+
+    def open_fee_configuration(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("费用配置")
+        dialog.setMinimumWidth(380)
+        layout = QGridLayout(dialog)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(8)
+
+        commission_spin = self._money_spin(6, 1.0)
+        commission_spin.setValue(self.stock_commission_rate)
+        buy_open_fee_spin = self._money_spin(2, 10000.0)
+        buy_open_fee_spin.setValue(self.option_buy_open_fee)
+        active_exercise_fee_spin = self._money_spin(2, 10000.0)
+        active_exercise_fee_spin.setValue(self.active_exercise_fee)
+        fields = [
+            ("现货佣金率", commission_spin),
+            ("买入开仓费(元/张)", buy_open_fee_spin),
+            ("主动行权费(元/张)", active_exercise_fee_spin),
+        ]
+        for row, (label, widget) in enumerate(fields):
+            layout.addWidget(QLabel(label, dialog), row, 0)
+            layout.addWidget(widget, row, 1)
+
+        if self._mode() in PASSIVE_SETTLEMENT_MODES:
+            passive_hint = QLabel("当前为被动指派模式，后两项不会计入本笔记录。", dialog)
+            passive_hint.setStyleSheet("color:#666666;")
+            layout.addWidget(passive_hint, len(fields), 0, 1, 2)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons, len(fields) + 1, 0, 1, 2)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.stock_commission_rate = commission_spin.value()
+        self.option_buy_open_fee = buy_open_fee_spin.value()
+        self.active_exercise_fee = active_exercise_fee_spin.value()
+        self._update_fee_summary()
+
+    def load_all_records(self) -> None:
         self.editing_record_id = None
         try:
             self.all_records = self.store.load_all()
-            month_text = self.selected_month_text()
-            self.records = [
-                record
-                for record in self.all_records
-                if str(record.get("settlement_date", ""))[:7] == month_text
-            ]
+            self.records = list(self.all_records)
         except ValueError as exc:
             self.all_records = []
             self.records = []
@@ -381,8 +448,8 @@ class StrategyLedgerDialog(QDialog):
 
     def refresh_view(self) -> None:
         total = sum(float(record.get("result", 0.0)) for record in self.records)
-        self.month_total_label.setText(f"本月已结算利润：¥{total:,.2f}")
-        self.record_count_label.setText(f"{len(self.records)} 条记录")
+        self.month_total_label.setText(f"账本累计利润：¥{total:,.2f}")
+        self.record_count_label.setText(f"共 {len(self.records)} 条记录")
         self.table.setRowCount(len(self.records))
         for row_index, record in enumerate(self.records):
             values = [
@@ -404,13 +471,14 @@ class StrategyLedgerDialog(QDialog):
                 if column in {4, 5, 6, 7, 8, 9}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.table.setItem(row_index, column, item)
-        self.status_label.setText("所有记录按已行权或被指派的实际结果结算。")
+        self.status_label.setText("显示全部记录；账本月份仅用于录入时约束结算日期。")
 
     def _record_from_form(self) -> dict[str, Any] | None:
         etf_code = self.etf_code_edit.text().strip().upper()
         if not etf_code:
             QMessageBox.warning(self, "盘后策略账本", "请填写 ETF 代码。")
             return None
+        self._sync_stock_shares()
         record = {
             "id": self.editing_record_id or uuid.uuid4().hex,
             "settlement_date": self.settlement_date_edit.date().toString("yyyy-MM-dd"),
@@ -418,16 +486,21 @@ class StrategyLedgerDialog(QDialog):
             "etf_code": etf_code,
             "option_code": self.option_code_edit.text().strip().upper(),
             "strike": self.strike_spin.value(),
-            "stock_shares": self.stock_shares_spin.value(),
+            "stock_shares": self.stock_shares,
             "stock_price": self.stock_price_spin.value(),
             "option_contracts": self.option_contracts_spin.value(),
             "option_premium": self.option_premium_spin.value(),
-            "stock_commission_rate": self.commission_spin.value(),
-            "option_buy_open_fee": self.option_buy_open_fee_spin.value(),
-            "active_exercise_fee": self.active_exercise_fee_spin.value(),
-            "borrow_cost": self.borrow_cost_spin.value(),
+            "stock_commission_rate": self.stock_commission_rate,
+            "option_buy_open_fee": (
+                0.0 if self._mode() in PASSIVE_SETTLEMENT_MODES else self.option_buy_open_fee
+            ),
+            "active_exercise_fee": (
+                0.0 if self._mode() in PASSIVE_SETTLEMENT_MODES else self.active_exercise_fee
+            ),
             "note": self.note_edit.text().strip(),
         }
+        if self.legacy_borrow_cost:
+            record["borrow_cost"] = self.legacy_borrow_cost
         if record["settlement_date"][:7] != self.selected_month_text():
             QMessageBox.warning(self, "盘后策略账本", "结算日期必须属于当前账本月份。")
             return None
@@ -474,33 +547,42 @@ class StrategyLedgerDialog(QDialog):
         self.editing_record_id = str(record.get("id", "")) or None
         mode_index = self.mode_combo.findData(record.get("mode", "mode1"))
         self.mode_combo.setCurrentIndex(max(mode_index, 0))
-        self.settlement_date_edit.setDate(QDate.fromString(str(record.get("settlement_date", "")), "yyyy-MM-dd"))
+        settlement_date = QDate.fromString(str(record.get("settlement_date", "")), "yyyy-MM-dd")
+        if settlement_date.isValid():
+            self.month_edit.setDate(QDate(settlement_date.year(), settlement_date.month(), 1))
+            self.settlement_date_edit.setDate(settlement_date)
         self.etf_code_edit.setText(str(record.get("etf_code", "")))
         self.option_code_edit.setText(str(record.get("option_code", "")))
         self.strike_spin.setValue(float(record.get("strike", 0.0)))
-        self.stock_shares_spin.setValue(int(record.get("stock_shares", 10000)))
         self.stock_price_spin.setValue(float(record.get("stock_price", 0.0)))
         self.option_contracts_spin.setValue(int(record.get("option_contracts", 1)))
         self.option_premium_spin.setValue(float(record.get("option_premium", 0.0)))
-        self.commission_spin.setValue(float(record.get("stock_commission_rate", 0.0001)))
-        self.option_buy_open_fee_spin.setValue(float(record.get("option_buy_open_fee", 0.0)))
-        self.active_exercise_fee_spin.setValue(float(record.get("active_exercise_fee", 0.0)))
-        self.borrow_cost_spin.setValue(float(record.get("borrow_cost", 0.0)))
+        self.stock_commission_rate = float(record.get("stock_commission_rate", DEFAULT_STOCK_COMMISSION_RATE))
+        if str(record.get("mode", "")) not in PASSIVE_SETTLEMENT_MODES:
+            self.option_buy_open_fee = float(
+                record.get("option_buy_open_fee", DEFAULT_OPTION_BUY_OPEN_FEE)
+            )
+            self.active_exercise_fee = float(
+                record.get("active_exercise_fee", DEFAULT_ACTIVE_EXERCISE_FEE)
+            )
+        self.legacy_borrow_cost = float(record.get("borrow_cost", 0.0))
         self.note_edit.setText(str(record.get("note", "")))
         self.save_button.setText("保存修改")
+        self._update_fee_summary()
 
     def clear_form(self) -> None:
         self.editing_record_id = None
         self.table.clearSelection()
-        self.settlement_date_edit.setDate(self.month_edit.date())
+        self._on_month_changed()
         self.option_code_edit.clear()
-        self.strike_spin.setValue(0.0)
-        self.stock_shares_spin.setValue(10000)
-        self.stock_price_spin.setValue(0.0)
+        self.strike_spin.setValue(DEFAULT_STRIKE)
+        self.stock_price_spin.setValue(DEFAULT_STOCK_PRICE)
         self.option_contracts_spin.setValue(1)
-        self.option_premium_spin.setValue(0.0)
-        self.commission_spin.setValue(0.0001)
-        self.borrow_cost_spin.setValue(0.0)
+        self.option_premium_spin.setValue(DEFAULT_OPTION_PREMIUM)
+        self.stock_commission_rate = DEFAULT_STOCK_COMMISSION_RATE
+        self.option_buy_open_fee = DEFAULT_OPTION_BUY_OPEN_FEE
+        self.active_exercise_fee = DEFAULT_ACTIVE_EXERCISE_FEE
+        self.legacy_borrow_cost = 0.0
         self.note_edit.clear()
         self.save_button.setText("新增记录")
         self._on_mode_changed()
@@ -514,7 +596,6 @@ class StrategyLedgerDialog(QDialog):
         self.strike_spin.setValue(float(prefill.get("strike", 0.0)))
         self.stock_price_spin.setValue(float(prefill.get("stock_price", 0.0)))
         self.option_premium_spin.setValue(float(prefill.get("option_premium", 0.0)))
-        self.stock_shares_spin.setValue(int(prefill.get("stock_shares", 10000)))
         self.option_contracts_spin.setValue(int(prefill.get("option_contracts", 1)))
         self.save_button.setText("新增记录")
 
@@ -524,10 +605,5 @@ class StrategyLedgerDialog(QDialog):
         except OSError as exc:
             QMessageBox.critical(self, "盘后策略账本", f"保存账本失败：{exc}")
             return
-        month_text = self.selected_month_text()
-        self.records = [
-            record
-            for record in self.all_records
-            if str(record.get("settlement_date", ""))[:7] == month_text
-        ]
+        self.records = list(self.all_records)
         self.refresh_view()
