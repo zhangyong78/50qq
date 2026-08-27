@@ -167,6 +167,23 @@ class StrategyLedgerDialogTests(unittest.TestCase):
             self.assertEqual(record["active_exercise_fee"], 0.0)
             self.assertNotIn("borrow_cost", record)
 
+    def test_form_display_precision_follows_price_direction_and_option_side(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            dialog = StrategyLedgerDialog(Path(temp_dir))
+
+            self.assertEqual(dialog.strike_spin.decimals(), 2)
+            dialog.mode_combo.setCurrentIndex(1)  # mode2: sell put + sell spot
+            self.assertEqual(dialog.stock_price_spin.decimals(), 3)
+            self.assertEqual(dialog.option_premium_spin.decimals(), 0)
+
+            dialog.mode_combo.setCurrentIndex(2)  # mode3: sell call + hold spot
+            self.assertEqual(dialog.stock_price_spin.decimals(), 6)
+            self.assertEqual(dialog.option_premium_spin.decimals(), 0)
+
+            dialog.mode_combo.setCurrentIndex(3)  # mode4: buy call + sell spot
+            self.assertEqual(dialog.stock_price_spin.decimals(), 3)
+            self.assertEqual(dialog.option_premium_spin.decimals(), 2)
+
     def test_prefill_updates_form_without_creating_a_record(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             dialog = StrategyLedgerDialog(Path(temp_dir))

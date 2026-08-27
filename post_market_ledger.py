@@ -256,7 +256,7 @@ class StrategyLedgerDialog(QDialog):
         self.etf_code_edit = QLineEdit("510050", self)
         self.option_code_edit = QLineEdit(self)
         self.option_code_edit.setPlaceholderText("如 100xxxx.SH")
-        self.strike_spin = self._money_spin(4, 100.0)
+        self.strike_spin = self._money_spin(2, 100.0)
         self.strike_spin.setValue(DEFAULT_STRIKE)
         self.stock_shares = OPTION_MULTIPLIER
         self.stock_price_label = QLabel("现货买入价")
@@ -374,6 +374,12 @@ class StrategyLedgerDialog(QDialog):
         stock_label, premium_label = labels[mode]
         self.stock_price_label.setText(stock_label)
         self.option_premium_label.setText(premium_label)
+        stock_price_decimals = 3 if mode in {"mode2", "mode4"} else 6
+        self.stock_price_spin.setDecimals(stock_price_decimals)
+        self.stock_price_spin.setSingleStep(0.001 if stock_price_decimals == 3 else 0.0001)
+        premium_decimals = 0 if mode in PASSIVE_SETTLEMENT_MODES else 2
+        self.option_premium_spin.setDecimals(premium_decimals)
+        self.option_premium_spin.setSingleStep(1.0 if premium_decimals == 0 else 0.01)
         self._update_fee_summary()
 
     def _update_fee_summary(self) -> None:
@@ -457,11 +463,19 @@ class StrategyLedgerDialog(QDialog):
                 MODE_LABELS.get(str(record.get("mode", "")), ""),
                 record.get("etf_code", ""),
                 record.get("option_code", ""),
-                f"{float(record.get('strike', 0.0)):.4f}",
+                f"{float(record.get('strike', 0.0)):.2f}",
                 str(record.get("stock_shares", "")),
                 str(record.get("option_contracts", "")),
-                f"{float(record.get('stock_price', 0.0)):.4f}",
-                f"{float(record.get('option_premium', 0.0)):.2f}",
+                (
+                    f"{float(record.get('stock_price', 0.0)):.3f}"
+                    if str(record.get("mode", "")) in {"mode2", "mode4"}
+                    else f"{float(record.get('stock_price', 0.0)):.4f}"
+                ),
+                (
+                    f"{float(record.get('option_premium', 0.0)):.0f}"
+                    if str(record.get("mode", "")) in PASSIVE_SETTLEMENT_MODES
+                    else f"{float(record.get('option_premium', 0.0)):.2f}"
+                ),
                 f"{float(record.get('result', 0.0)):.2f}",
                 record.get("formula", ""),
                 record.get("note", ""),
