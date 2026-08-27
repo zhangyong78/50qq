@@ -50,7 +50,7 @@ from post_market_ledger import StrategyLedgerDialog
 
 
 CONFIG_FILE = "contracts_config.json"
-APP_VERSION = "V2026.08.27.01"
+APP_VERSION = "V2026.08.27.02"
 APP_WINDOW_TITLE = f"A股ETF期权交割套利机会扫描器 {APP_VERSION}"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
 QMT_CONNECT_TIMEOUT_SEC = 4.0
@@ -3026,6 +3026,7 @@ class MainWindow(QMainWindow):
         self.config = load_app_config(config_path)
         self.fees = FeeConfig.from_dict(self.config["fees"])
         self.is_frozen = False
+        self._live_render_paused = False
         self.latest_rows: list[dict[str, Any]] = []
         self.latest_diagnostic_info: dict[str, Any] = {}
         self.config_dialog: ConfigDialog | None = None
@@ -3509,6 +3510,8 @@ class MainWindow(QMainWindow):
 
     def on_rows_ready(self, rows: list[dict[str, Any]]) -> None:
         self.latest_rows = rows
+        if self._live_render_paused:
+            return
         if not self.is_frozen:
             self.render_rows(rows)
         self._update_recommendations(rows)
@@ -3877,11 +3880,18 @@ class MainWindow(QMainWindow):
         return None
 
     def open_post_market_ledger(self) -> None:
-        dialog = StrategyLedgerDialog(self.config_path.parent, self)
-        prefill = self._selected_ledger_prefill()
-        if prefill is not None:
-            dialog.apply_prefill(prefill)
-        dialog.exec()
+        self._live_render_paused = True
+        try:
+            dialog = StrategyLedgerDialog(self.config_path.parent, self)
+            prefill = self._selected_ledger_prefill()
+            if prefill is not None:
+                dialog.apply_prefill(prefill)
+            dialog.exec()
+        finally:
+            self._live_render_paused = False
+            if not self.is_frozen:
+                self.render_rows(self.latest_rows)
+            self._update_recommendations(self.latest_rows)
 
     def open_config_dialog(self) -> None:
         dialog = ConfigDialog(
