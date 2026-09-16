@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -50,7 +51,7 @@ from post_market_ledger import StrategyLedgerDialog
 
 
 CONFIG_FILE = "contracts_config.json"
-APP_VERSION = "V2026.08.27.02"
+APP_VERSION = "V2026.09.16.01"
 APP_WINDOW_TITLE = f"A股ETF期权交割套利机会扫描器 {APP_VERSION}"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
 QMT_CONNECT_TIMEOUT_SEC = 4.0
@@ -225,6 +226,8 @@ def default_app_config() -> dict[str, Any]:
     return {
         "qmt": {
             "qmt_path": r"D:\兴业证券SMT-Q-2.0.8.0-test\userdata_mini",
+            "quote_source": "qmt_api",
+            "bridge_file": r"D:\mycode\50qq\qmt_full_bridge.json",
             "poll_interval_ms": 500,
             "enable_mock_when_xtquant_missing": False,
             "auto_atm": True,
@@ -377,6 +380,22 @@ class Tick:
     bid1: float
     ask1: float
     last: float
+
+
+def ticks_with_last_price_estimates(
+    ticks: dict[str, Tick], last_only_prices: dict[str, float]
+) -> dict[str, Tick]:
+    """Fill absent option quotes with last-price estimates for display only.
+
+    The caller must keep the original ``ticks`` for market-status and alerts:
+    an estimated Tick is intentionally not a real executable bid/ask.
+    """
+    result = dict(ticks)
+    for code, raw_price in last_only_prices.items():
+        price = first_number(raw_price)
+        if code and code not in result and price > 0:
+            result[code] = Tick(bid1=price, ask1=price, last=price)
+    return result
 
 
 def first_number(value: Any) -> float:
@@ -663,6 +682,15 @@ def expiry_to_yyyymm(expiry: str) -> str:
 def current_expiry_yyyymm() -> str:
     """Return the only expiry month used by automatic option-chain scans."""
     return time.strftime("%Y%m")
+
+
+def is_option_quote_session(timestamp: float | None = None) -> bool:
+    """Whether an ETF option snapshot should be receiving live quote updates."""
+    current = time.localtime(time.time() if timestamp is None else timestamp)
+    if current.tm_wday >= 5:
+        return False
+    minutes = current.tm_hour * 60 + current.tm_min
+    return 9 * 60 + 15 <= minutes <= 11 * 60 + 35 or 12 * 60 + 55 <= minutes <= 15 * 60 + 5
 
 
 def format_expiry_date(expire_date: str | None) -> str:
@@ -1837,7 +1865,9 @@ def build_market_status(
     ticks: dict[str, Tick],
     *,
     error: str = "",
+    last_only_prices: dict[str, float] | None = None,
 ) -> dict[str, Any]:
+    last_only_prices = last_only_prices or {}
     spot_codes = sorted({template.spot_code for template in templates})
     spots: dict[str, Any] = {}
     for code in spot_codes:
@@ -1853,6 +1883,8 @@ def build_market_status(
     status_pairs = select_atm_pairs_for_status(display_pairs)
     contracts: dict[str, Any] = {}
     for pair in status_pairs:
+        call_tick = ticks.get(pair.call_code)
+        put_tick = ticks.get(pair.put_code)
         contracts[pair.spot_code] = {
             "pool": pair.pool_name,
             "strike": pair.strike,
@@ -1860,8 +1892,10 @@ def build_market_status(
             "put": pair.put_code,
             "expiry": pair.expiry,
             "name": pair.name,
-            "call_ok": ticks.get(pair.call_code) is not None if pair.call_code else False,
-            "put_ok": ticks.get(pair.put_code) is not None if pair.put_code else False,
+            "call_ok": call_tick is not None if pair.call_code else False,
+            "put_ok": put_tick is not None if pair.put_code else False,
+            "call_last": call_tick.last if call_tick else first_number(last_only_prices.get(pair.call_code)),
+            "put_last": put_tick.last if put_tick else first_number(last_only_prices.get(pair.put_code)),
             "atm_pending": False,
         }
     chain_error = ""
@@ -1875,6 +1909,8 @@ def build_market_status(
             continue
         call_code = normalize_market_code(template.call_code)
         put_code = normalize_market_code(template.put_code)
+        call_tick = ticks.get(call_code)
+        put_tick = ticks.get(put_code)
         contracts[template.spot_code] = {
             "pool": template.pool_name,
             "strike": template.strike,
@@ -1882,14 +1918,17 @@ def build_market_status(
             "put": put_code or "-",
             "expiry": template.expiry,
             "name": template.name,
-            "call_ok": bool(call_code) and ticks.get(call_code) is not None,
-            "put_ok": bool(put_code) and ticks.get(put_code) is not None,
+            "call_ok": bool(call_code) and call_tick is not None,
+            "put_ok": bool(put_code) and put_tick is not None,
+            "call_last": call_tick.last if call_tick else first_number(last_only_prices.get(call_code)),
+            "put_last": put_tick.last if put_tick else first_number(last_only_prices.get(put_code)),
             "atm_pending": not call_code and not put_code,
             "chain_error": chain_error or "",
         }
 
     option_total = 0
     option_ok = 0
+    option_last_only = 0
     for pair in display_pairs:
         for code in (pair.call_code, pair.put_code):
             if not code:
@@ -1897,12 +1936,15 @@ def build_market_status(
             option_total += 1
             if ticks.get(code) is not None:
                 option_ok += 1
+            elif first_number(last_only_prices.get(code)) > 0:
+                option_last_only += 1
 
     return {
         "spots": spots,
         "contracts": contracts,
         "option_total": option_total,
         "option_ok": option_ok,
+        "option_last_only": option_last_only,
         "error": str(error or "").strip(),
     }
 
@@ -1966,8 +2008,14 @@ def format_contract_targets_text(status: dict[str, Any]) -> str:
             )
             lines.append(f"  · {pool}（{short_code}）{mock_flag}  {spot_hint}，{chain_hint}")
             continue
-        call_quote = "有盘口" if info.get("call_ok") else "获取不到行情"
-        put_quote = "有盘口" if info.get("put_ok") else "获取不到行情"
+        call_last = first_number(info.get("call_last"))
+        put_last = first_number(info.get("put_last"))
+        call_quote = "有盘口" if info.get("call_ok") else (
+            f"末价 {call_last:.4f}（无盘口）" if call_last > 0 else "获取不到行情"
+        )
+        put_quote = "有盘口" if info.get("put_ok") else (
+            f"末价 {put_last:.4f}（无盘口）" if put_last > 0 else "获取不到行情"
+        )
         lines.append(
             f"  · {pool}（{short_code}）{mock_flag}  行权价 {strike_text}  到期 {expiry}"
         )
@@ -1982,15 +2030,19 @@ CONTRACT_TABLE_HEADERS = [
     "现货实时价",
     "行权价",
     "到期",
-    "认购",
-    "认沽",
+    "认购（末价）",
+    "认沽（末价）",
     "认购盘口",
     "认沽盘口",
 ]
 
 
-def _quote_status_text(ok: bool) -> str:
-    return "正常" if ok else "无行情"
+def _quote_status_text(ok: bool, last_only: float = 0.0) -> str:
+    if ok:
+        return "正常"
+    if last_only > 0:
+        return f"末价 {last_only:.4f}（无盘口）"
+    return "无行情"
 
 
 def _apply_table_status_item(item: QTableWidgetItem, ok: bool) -> None:
@@ -2008,6 +2060,7 @@ def format_worker_status_message(
     pairs: list[OptionPair],
     ticks: dict[str, Tick],
     qmt_error: str = "",
+    last_only_prices: dict[str, float] | None = None,
 ) -> tuple[str, bool]:
     if use_mock:
         sample = pairs[0] if pairs else None
@@ -2024,12 +2077,27 @@ def format_worker_status_message(
         return f"获取不到行情：{detail}", False
 
     missing: list[str] = []
+    last_only_count = 0
+    missing_option_count = 0
+    option_codes = {
+        code for pair in pairs for code in (pair.call_code, pair.put_code) if code
+    }
     for code in collect_quote_codes(pairs):
         if ticks.get(code) is None:
             missing.append(format_code_short(code))
+            if code in option_codes:
+                missing_option_count += 1
+                if first_number((last_only_prices or {}).get(code)) > 0:
+                    last_only_count += 1
 
     if missing:
         note = f"（{connect_note}）" if connect_note else ""
+        if last_only_count:
+            return (
+                f"QMT已连接{note}，已读取 {last_only_count}/{missing_option_count} 张期权末价，"
+                "等待买一/卖一盘口。",
+                False,
+            )
         return f"QMT已连接{note}，获取不到行情：{', '.join(missing)}", False
 
     note = f"（{connect_note}）" if connect_note else ""
@@ -2090,6 +2158,79 @@ class QmtQuoteSource:
         if parsed:
             with self._lock:
                 self._ticks.update(parsed)
+
+
+class FullQmtBridgeSource:
+    """Read the local snapshot written by a strategy running inside Full QMT."""
+
+    def __init__(self, bridge_file: str) -> None:
+        self.path = Path(bridge_file)
+        self._last_message: dict[str, Any] | None = None
+
+    def fetch_snapshot(self) -> tuple[list[OptionPair], dict[str, Tick], dict[str, Any]]:
+        if not self.path.exists():
+            raise RuntimeError(f"等待大QMT桥接文件：{self.path}")
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            # During a direct-write fallback, keep the last complete snapshot.
+            if self._last_message is None:
+                raise RuntimeError(f"桥接文件暂时不可读：{exc}") from exc
+            payload = self._last_message
+        if not isinstance(payload, dict) or payload.get("type") != "full_qmt_bridge":
+            raise RuntimeError("桥接文件不是完整大QMT行情桥接，请更新并运行桥接策略")
+        self._last_message = payload
+
+        raw_ticks = payload.get("ticks", {})
+        ticks: dict[str, Tick] = {}
+        # A final traded price is useful for visibility after the close, but it
+        # must not be converted into a synthetic bid/ask for arbitrage math.
+        last_only_prices: dict[str, float] = {}
+        if isinstance(raw_ticks, dict):
+            for code, raw in raw_ticks.items():
+                # Cached last-trade prices are not executable two-sided quotes.
+                if not isinstance(raw, dict):
+                    continue
+                bid = pick_number(raw, ["bidPrice", "bid_price", "bidPrice1", "bid1", "BidPrice1"])
+                ask = pick_number(raw, ["askPrice", "ask_price", "askPrice1", "ask1", "AskPrice1"])
+                last = pick_number(raw, ["lastPrice", "last_price", "last", "price", "LastPrice"])
+                normalized_code = normalize_market_code(str(code))
+                if bid <= 0 or ask <= 0:
+                    if normalized_code and last > 0:
+                        last_only_prices[normalized_code] = last
+                    continue
+                tick = normalize_tick(raw)
+                if tick is not None:
+                    ticks[normalized_code] = tick
+        payload["_last_only_prices"] = last_only_prices
+
+        pairs: list[OptionPair] = []
+        raw_pairs = payload.get("pairs", [])
+        if isinstance(raw_pairs, list):
+            for raw in raw_pairs:
+                if not isinstance(raw, dict):
+                    continue
+                spot_code = normalize_market_code(str(raw.get("spot_code", "")))
+                call_code = normalize_market_code(str(raw.get("call_code", "")))
+                put_code = normalize_market_code(str(raw.get("put_code", "")))
+                strike = first_number(raw.get("strike"))
+                if not spot_code or not call_code or not put_code or strike <= 0:
+                    continue
+                pairs.append(
+                    OptionPair(
+                        pool_name=str(raw.get("pool_name", "")).strip() or spot_code,
+                        spot_code=spot_code,
+                        strike=strike,
+                        call_code=call_code,
+                        put_code=put_code,
+                        expiry=str(raw.get("expiry", "")).strip(),
+                        name=str(raw.get("name", "")).strip(),
+                        atm_tier=max(0, min(5, int(first_number(raw.get("atm_tier"))))),
+                        ref_atm_strike=first_number(raw.get("ref_atm_strike")) or strike,
+                        is_adjusted=bool(raw.get("is_adjusted", False)),
+                    )
+                )
+        return pairs, ticks, payload
 
 
 class MockQuoteSource:
@@ -2370,6 +2511,10 @@ class QuoteWorker(QThread):
             fees = FeeConfig.from_dict(config["fees"])
             self.set_sound_enabled(fees.sound_enabled)
             qmt_config = config.get("qmt", {})
+            quote_source = str(qmt_config.get("quote_source", "qmt_api")).strip().lower()
+            if quote_source == "full_qmt_bridge":
+                self._run_full_qmt_bridge(config, fees)
+                return
             qmt_path = str(qmt_config.get("qmt_path", "")).strip()
             self._emit_diagnostic(qmt_path)
             auto_atm = bool(qmt_config.get("auto_atm", True))
@@ -2550,6 +2695,115 @@ class QuoteWorker(QThread):
         except Exception as exc:
             self.status_ready.emit(f"工作线程异常：{format_qmt_connect_error(exc)}", False)
 
+    def _run_full_qmt_bridge(self, config: dict[str, Any], fees: FeeConfig) -> None:
+        """Main loop for the Full-QMT JSON bridge; no local xtquant call."""
+        qmt_config = config.get("qmt", {})
+        interval_sec = max(0.10, int(qmt_config.get("poll_interval_ms", 500)) / 1000)
+        bridge_file = str(qmt_config.get("bridge_file", r"D:\mycode\50qq\qmt_full_bridge.json")).strip()
+        templates = build_option_pairs(config["contract_pools"], auto_atm=True)
+        if not templates:
+            self.status_ready.emit("没有可监控的期权合约，请检查配置。", False)
+            return
+
+        self.diagnostic_ready.emit(
+            {
+                "config_path": str(self.config_path),
+                "configured_qmt_path": str(qmt_config.get("qmt_path", "")),
+                "resolved_qmt_path": "大QMT文件桥接",
+                "data_dir": bridge_file,
+                "candidate_ports": [],
+                "connect_note": "不使用58600端口",
+                "qmt_error": "",
+            }
+        )
+        source = FullQmtBridgeSource(bridge_file)
+        self.status_ready.emit("正在等待大QMT桥接行情...", False)
+        self.market_ready.emit(build_market_status(templates, pairs_from_templates(templates), {}))
+
+        while self._running:
+            try:
+                pairs, ticks, payload = source.fetch_snapshot()
+                sent_at = first_number(payload.get("sent_at"))
+                age_sec = max(0.0, time.time() - sent_at / 1000) if sent_at else 9999.0
+                snapshot_note = ""
+                if age_sec > 20:
+                    if is_option_quote_session():
+                        raise RuntimeError(f"大QMT桥接已 {age_sec:.0f} 秒未更新，请确认策略正在运行")
+                    snapshot_note = f"；收盘后快照 {age_sec:.0f} 秒前"
+                if not pairs:
+                    raise RuntimeError("大QMT尚未生成有效期权链，等待现货行情与期权列表")
+                if not str(payload.get("bridge_version", "")).strip():
+                    raise RuntimeError(
+                        "大QMT桥接仍是旧版：当前只写入现货报价，未写入期权买一/卖一。"
+                        "请将桥接策略替换为 qmt_full_bridge_loader.py 后停止并重新运行一次。"
+                    )
+
+                last_only_prices = payload.get("_last_only_prices", {})
+                if not isinstance(last_only_prices, dict):
+                    last_only_prices = {}
+                self.market_ready.emit(
+                    build_market_status(
+                        templates, pairs, ticks, last_only_prices=last_only_prices
+                    )
+                )
+                calculation_ticks = ticks_with_last_price_estimates(ticks, last_only_prices)
+                rows = calculate_opportunities(pairs, calculation_ticks, fees)
+                if last_only_prices:
+                    for row in rows:
+                        row["is_last_price_estimate"] = True
+                status_msg, connected = format_worker_status_message(
+                    connected=True,
+                    use_mock=False,
+                    connect_note=(
+                        f"大QMT文件桥接 {payload.get('bridge_version', '旧版')}（买一/卖一）"
+                        + snapshot_note
+                    ),
+                    pairs=pairs,
+                    ticks=ticks,
+                    last_only_prices=last_only_prices,
+                )
+                if not is_option_quote_session():
+                    total_option_codes = sum(
+                        1 for pair in pairs for code in (pair.call_code, pair.put_code) if code
+                    )
+                    closing_books = sum(
+                        1 for pair in pairs for code in (pair.call_code, pair.put_code)
+                        if code and code in ticks
+                    )
+                    if closing_books:
+                        status_msg = (
+                            f"大QMT收盘行情快照：五档盘口 {closing_books}/{total_option_codes}；"
+                            "下方模式按收盘盘口计算，下一交易时段将自动刷新。"
+                        )
+                    else:
+                        status_msg = (
+                            f"大QMT收盘末价快照：末价 {len(last_only_prices)}/{total_option_codes}；"
+                            "下方模式按收盘末价估算，非实时盘口，不可直接下单。"
+                        )
+                    connected = False
+                subscription = payload.get("subscription", {})
+                if isinstance(subscription, dict):
+                    failed = subscription.get("failed", [])
+                    if isinstance(failed, list) and failed:
+                        status_msg += f"；{len(failed)} 个期权订阅失败"
+                diagnostics = payload.get("diagnostics", {})
+                if isinstance(diagnostics, dict) and diagnostics.get("option_book_count") == 0:
+                    errors = diagnostics.get("errors", {})
+                    if isinstance(errors, dict) and errors:
+                        status_msg += "；期权接口：" + "；".join(f"{k}: {v}" for k, v in errors.items())
+                if last_only_prices:
+                    status_msg += "；下方模式按收盘末价估算，非实时盘口，不可直接下单"
+                self.rows_ready.emit(rows)
+                if connected:
+                    self._beep_for_alerts(rows, fees)
+                self.status_ready.emit(status_msg, connected)
+            except Exception as exc:
+                detail = str(exc)
+                self.market_ready.emit(build_market_status(templates, pairs_from_templates(templates), {}, error=detail))
+                self.rows_ready.emit([])
+                self.status_ready.emit(detail, False)
+            time.sleep(interval_sec)
+
     def _create_quote_source(
         self,
         config: dict[str, Any],
@@ -2665,6 +2919,11 @@ class ConfigDialog(QDialog):
             "股票期权请填大QMT的 userdata；留空则自动发现。"
             "仅交易端口(58600)无行情，需行情+交易(58670)或 miniQMT(58610)"
         )
+        self.quote_source_combo = QComboBox(qmt_box)
+        self.quote_source_combo.addItem("大QMT文件桥接（推荐）", "full_qmt_bridge")
+        self.quote_source_combo.addItem("原QMT直连（备用）", "qmt_api")
+        self.bridge_file_edit = QLineEdit(qmt_box)
+        self.bridge_file_edit.setPlaceholderText(r"例如 D:\mycode\50qq\qmt_full_bridge.json")
         self.poll_interval_spin = QSpinBox(qmt_box)
         self.poll_interval_spin.setRange(50, 10000)
         self.poll_interval_spin.setSuffix(" ms")
@@ -2678,6 +2937,8 @@ class ConfigDialog(QDialog):
         self.atm_strike_tiers_spin.setSuffix(" 档")
         self.atm_strike_tiers_spin.setToolTip("自动平值时向上下扩展的档位数：0=仅平值，5=平值±5档")
         qmt_form.addRow("QMT路径", self.qmt_path_edit)
+        qmt_form.addRow("行情方式", self.quote_source_combo)
+        qmt_form.addRow("桥接文件", self.bridge_file_edit)
         qmt_form.addRow("刷新频率", self.poll_interval_spin)
         qmt_form.addRow("平值刷新间隔", self.atm_refresh_spin)
         qmt_form.addRow("平值上下档数", self.atm_strike_tiers_spin)
@@ -2793,6 +3054,10 @@ class ConfigDialog(QDialog):
         qmt = config.get("qmt", {})
         fees = config.get("fees", {})
         self.qmt_path_edit.setText(str(qmt.get("qmt_path", "")))
+        quote_source = str(qmt.get("quote_source", "qmt_api"))
+        source_index = self.quote_source_combo.findData(quote_source)
+        self.quote_source_combo.setCurrentIndex(max(0, source_index))
+        self.bridge_file_edit.setText(str(qmt.get("bridge_file", r"D:\mycode\50qq\qmt_full_bridge.json")))
         self.poll_interval_spin.setValue(int(qmt.get("poll_interval_ms", 500)))
         self.auto_atm_checkbox.setChecked(bool(qmt.get("auto_atm", True)))
         self.enable_mock_checkbox.setChecked(bool(qmt.get("enable_mock_when_xtquant_missing", False)))
@@ -2952,6 +3217,8 @@ class ConfigDialog(QDialog):
         return {
             "qmt": {
                 "qmt_path": self.qmt_path_edit.text().strip(),
+                "quote_source": str(self.quote_source_combo.currentData()),
+                "bridge_file": self.bridge_file_edit.text().strip(),
                 "poll_interval_ms": int(self.poll_interval_spin.value()),
                 "enable_mock_when_xtquant_missing": self.enable_mock_checkbox.isChecked(),
                 "auto_atm": self.auto_atm_checkbox.isChecked(),
@@ -3152,17 +3419,20 @@ class MainWindow(QMainWindow):
         self.contract_table.setMinimumHeight(88)
         self.contract_table.setMaximumHeight(156)
         contract_layout.addWidget(self.contract_table)
-        layout.addWidget(contract_box)
+        top_info_layout = QHBoxLayout()
+        top_info_layout.setSpacing(6)
+        top_info_layout.addWidget(contract_box, 1)
 
         recommend_box = QGroupBox("推荐操作", self)
-        recommend_layout = QVBoxLayout(recommend_box)
+        recommend_layout = QHBoxLayout(recommend_box)
+        recommend_layout.setSpacing(6)
         self.recommendation_label = QLabel("推荐1-3：等待行情与收益计算，默认优先展示保底收益机会。")
         self.recommendation_label.setWordWrap(True)
         self.recommendation_label.setStyleSheet(
             "background:#f6fbf7; color:#1f3b2d; padding:6px 8px; border-radius:4px;"
             "border:1px solid #cfe8d6; font-size:12px;"
         )
-        recommend_layout.addWidget(self.recommendation_label)
+        recommend_layout.addWidget(self.recommendation_label, 1)
         self.recommendation_guidance_label = QLabel(
             "交易提示：等待行情与收益计算后显示时间价值和主动行权提醒。"
         )
@@ -3172,9 +3442,7 @@ class MainWindow(QMainWindow):
             "background:#eef6ff; color:#174a72; padding:5px 8px; border-radius:4px;"
             "border:1px solid #c9def2; font-size:11px;"
         )
-        recommend_layout.addWidget(self.recommendation_guidance_label)
-        layout.addWidget(recommend_box)
-
+        recommend_layout.addWidget(self.recommendation_guidance_label, 1)
         filtered_recommend_box = QGroupBox("当前筛选推荐", self)
         filtered_recommend_layout = QVBoxLayout(filtered_recommend_box)
         self.filtered_recommendation_label = QLabel("等待下方品种筛选与行情联动。")
@@ -3184,7 +3452,9 @@ class MainWindow(QMainWindow):
             "border:1px solid #f3d7a3; font-size:12px;"
         )
         filtered_recommend_layout.addWidget(self.filtered_recommendation_label)
-        layout.addWidget(filtered_recommend_box)
+        top_info_layout.addWidget(filtered_recommend_box, 3)
+        layout.addLayout(top_info_layout)
+        layout.addWidget(recommend_box)
 
         filter_box = QGroupBox("表格筛选", self)
         filter_row = QHBoxLayout(filter_box)
@@ -3385,8 +3655,10 @@ class MainWindow(QMainWindow):
 
         option_total = int(status.get("option_total", 0))
         option_ok = int(status.get("option_ok", 0))
+        option_last_only = int(status.get("option_last_only", 0))
         if option_total:
-            self.option_summary_label.setText(f"期权盘口：{option_ok} / {option_total} 有效")
+            suffix = f"；末价 {option_last_only} 条" if option_last_only else ""
+            self.option_summary_label.setText(f"期权盘口：{option_ok} / {option_total} 有效{suffix}")
         else:
             self.option_summary_label.setText("期权盘口：等待解析认购/认沽")
 
@@ -3400,6 +3672,10 @@ class MainWindow(QMainWindow):
             strike_text = format_strike_display(strike, spot_code) if strike > 0 else "-"
             call_code = str(info.get("call") or "-")
             put_code = str(info.get("put") or "-")
+            call_last = first_number(info.get("call_last"))
+            put_last = first_number(info.get("put_last"))
+            call_display = f"{call_code}  {call_last:.4f}" if call_last > 0 else call_code
+            put_display = f"{put_code}  {put_last:.4f}" if put_last > 0 else put_code
             expiry = str(info.get("expiry") or "-")
             spot_quote = status.get("spots", {}).get(spot_code, {})
             spot_price = first_number(spot_quote.get("price"))
@@ -3408,8 +3684,12 @@ class MainWindow(QMainWindow):
                 call_status = str(info.get("chain_error") or "待自动平值")
                 put_status = ""
             else:
-                call_status = _quote_status_text(bool(info.get("call_ok")))
-                put_status = _quote_status_text(bool(info.get("put_ok")))
+                call_status = _quote_status_text(
+                    bool(info.get("call_ok")), call_last
+                )
+                put_status = _quote_status_text(
+                    bool(info.get("put_ok")), put_last
+                )
 
             values = [
                 pool,
@@ -3417,8 +3697,8 @@ class MainWindow(QMainWindow):
                 spot_price_text,
                 strike_text,
                 expiry,
-                call_code,
-                put_code,
+                call_display,
+                put_display,
                 call_status,
                 put_status,
             ]
@@ -3427,9 +3707,15 @@ class MainWindow(QMainWindow):
                 if column in {2, 3}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 if column == 7 and not info.get("atm_pending"):
-                    _apply_table_status_item(item, bool(info.get("call_ok")))
+                    if call_last > 0 and not info.get("call_ok"):
+                        item.setForeground(QColor("#b26a00"))
+                    else:
+                        _apply_table_status_item(item, bool(info.get("call_ok")))
                 if column == 8 and not info.get("atm_pending"):
-                    _apply_table_status_item(item, bool(info.get("put_ok")))
+                    if put_last > 0 and not info.get("put_ok"):
+                        item.setForeground(QColor("#b26a00"))
+                    else:
+                        _apply_table_status_item(item, bool(info.get("put_ok")))
                 if column == 1 and not spot_quote.get("ok"):
                     item.setForeground(QColor("#c62828"))
                 self.contract_table.setItem(row_index, column, item)

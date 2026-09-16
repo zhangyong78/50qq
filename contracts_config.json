@@ -1,6 +1,8 @@
 {
   "qmt": {
     "qmt_path": "D:\\金融软件\\兴业证券SMT-Q\\bin.x64\\userdata_mini",
+    "quote_source": "full_qmt_bridge",
+    "bridge_file": "D:\\mycode\\50qq\\qmt_full_bridge.json",
     "poll_interval_ms": 500,
     "enable_mock_when_xtquant_missing": false,
     "auto_atm": true,

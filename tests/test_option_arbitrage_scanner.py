@@ -1,15 +1,25 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from PyQt6.QtWidgets import QApplication
+
 from option_arbitrage_scanner import (
+    ConfigDialog,
     MainWindow,
     MODE_TIME_VALUE_REQUIREMENTS,
     OptionPair,
     Tick,
     build_market_status,
+    ticks_with_last_price_estimates,
     current_expiry_yyyymm,
+    default_app_config,
     default_fee_config,
+    format_worker_status_message,
     ARBITRAGE_MODE_DEFS,
+    FullQmtBridgeSource,
     option_exercise_status_text,
     option_moneyness_text,
     pick_atm_for_underlying,
@@ -17,11 +27,87 @@ from option_arbitrage_scanner import (
     recommendation_guidance_html,
     recommendation_guidance_text,
     strike_distance_tier,
+    is_option_quote_session,
     sort_mode_rows_by_strike,
 )
 
 
 class ExpiryAndMoneynessTests(unittest.TestCase):
+    def test_quote_session_excludes_after_close_and_weekends(self):
+        self.assertTrue(is_option_quote_session(1789524600.0))  # 2026-09-16 10:10 Shanghai
+        self.assertFalse(is_option_quote_session(1789557000.0))  # 2026-09-16 19:10 Shanghai
+        self.assertFalse(is_option_quote_session(1789870200.0))  # 2026-09-20 Sunday 10:10 Shanghai
+
+    def test_full_qmt_bridge_reads_pair_metadata_and_bid_ask(self):
+        payload = {
+            "type": "full_qmt_bridge",
+            "ticks": {
+                "510050.SH": {"bidPrice": [2.999], "askPrice": [3.001], "lastPrice": 3.0},
+                "10000001.SHO": {"bidPrice": [0.102], "askPrice": [0.103]},
+                "10000002.SHO": {"bidPrice": [0.101], "askPrice": [0.102]},
+                "10000003.SHO": {"lastPrice": 0.11},
+                "10000004.SHO": {"bidPrice": [0.11], "lastPrice": 0.11},
+            },
+            "pairs": [
+                {
+                    "pool_name": "50ETF",
+                    "spot_code": "510050.SH",
+                    "strike": 3.0,
+                    "call_code": "10000001.SHO",
+                    "put_code": "10000002.SHO",
+                    "expiry": "2026-09-23",
+                    "atm_tier": 0,
+                    "ref_atm_strike": 3.0,
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            bridge_file = Path(directory) / "bridge.json"
+            bridge_file.write_text(json.dumps(payload), encoding="utf-8")
+            pairs, ticks, message = FullQmtBridgeSource(str(bridge_file)).fetch_snapshot()
+
+        self.assertEqual(message["type"], "full_qmt_bridge")
+        self.assertEqual(pairs[0].call_code, "10000001.SHO")
+        self.assertEqual(pairs[0].atm_tier, 0)
+        self.assertEqual(ticks["510050.SH"], Tick(2.999, 3.001, 3.0))
+        self.assertNotIn("10000003.SHO", ticks)
+        self.assertNotIn("10000004.SHO", ticks)
+        self.assertEqual(message["_last_only_prices"]["10000003.SHO"], 0.11)
+
+    def test_market_status_keeps_last_price_separate_from_executable_book(self):
+        pair = OptionPair(
+            pool_name="50ETF", spot_code="510050.SH", strike=3.0,
+            call_code="10000001.SHO", put_code="10000002.SHO", expiry="2026-09-23",
+        )
+        status = build_market_status(
+            [pair], [pair], {"510050.SH": Tick(2.999, 3.001, 3.0)},
+            last_only_prices={"10000001.SHO": 0.123},
+        )
+        self.assertEqual(status["option_ok"], 0)
+        self.assertEqual(status["option_last_only"], 1)
+        self.assertEqual(status["contracts"]["510050.SH"]["call_last"], 0.123)
+
+    def test_last_prices_can_feed_display_only_calculation_ticks(self):
+        estimated = ticks_with_last_price_estimates(
+            {"510050.SH": Tick(2.999, 3.001, 3.0)},
+            {"10000001.SHO": 0.123},
+        )
+        self.assertEqual(estimated["10000001.SHO"], Tick(0.123, 0.123, 0.123))
+        self.assertEqual(estimated["510050.SH"], Tick(2.999, 3.001, 3.0))
+
+    def test_worker_status_reports_last_prices_without_claiming_a_book(self):
+        pair = OptionPair(
+            pool_name="50ETF", spot_code="510050.SH", strike=3.0,
+            call_code="10000001.SHO", put_code="10000002.SHO", expiry="2026-09-23",
+        )
+        message, connected = format_worker_status_message(
+            connected=True, use_mock=False, connect_note="收盘后快照", pairs=[pair], ticks={},
+            last_only_prices={"10000001.SHO": 0.123, "10000002.SHO": 0.101},
+        )
+        self.assertFalse(connected)
+        self.assertIn("已读取 2/2 张期权末价", message)
+        self.assertIn("等待买一/卖一盘口", message)
+
     def test_mode_titles_show_expected_time_value_direction(self):
         self.assertEqual(MODE_TIME_VALUE_REQUIREMENTS["模式1"], "时间价值需为负数")
         self.assertEqual(MODE_TIME_VALUE_REQUIREMENTS["模式4"], "时间价值需为负数")
@@ -195,6 +281,18 @@ class ExpiryAndMoneynessTests(unittest.TestCase):
         }
 
         self.assertEqual(recommendation_effective_profit(row), 39.95)
+
+
+class ConfigDialogTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.application = QApplication.instance() or QApplication([])
+
+    def test_config_dialog_constructs_with_quote_source_selector(self):
+        dialog = ConfigDialog(default_app_config())
+        self.assertEqual(dialog.quote_source_combo.count(), 2)
+        self.assertEqual(dialog.quote_source_combo.currentData(), "qmt_api")
+        dialog.close()
 
 
 if __name__ == "__main__":
