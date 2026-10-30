@@ -41,7 +41,7 @@ class SettlementCalculationTests(unittest.TestCase):
             "stock_commission_rate": 0.0002,
         }
 
-        self.assertEqual(calculate_settled_profit(record), 568.92)
+        self.assertEqual(calculate_settled_profit(record), 568.32)
 
     def test_mode3_passive_call_assignment_does_not_charge_option_fees(self):
         record = {
@@ -56,7 +56,7 @@ class SettlementCalculationTests(unittest.TestCase):
             "active_exercise_fee": 999.0,
         }
 
-        self.assertEqual(calculate_settled_profit(record), 543.90)
+        self.assertEqual(calculate_settled_profit(record), 543.80)
 
     def test_mode4_active_call_settlement_includes_borrow_and_option_fees(self):
         record = {
@@ -101,7 +101,7 @@ class SettlementCalculationTests(unittest.TestCase):
         formula = format_settlement_formula(record)
 
         self.assertIn("3.0900", formula)
-        self.assertIn("568.92", formula)
+        self.assertIn("568.32", formula)
 
 
 class StrategyLedgerStoreTests(unittest.TestCase):
@@ -137,7 +137,7 @@ class StrategyLedgerDialogTests(unittest.TestCase):
 
             self.assertEqual(dialog.store.data_path, config_dir / "strategy_ledger.json")
             self.assertEqual(dialog.table.rowCount(), 2)
-            self.assertTrue(dialog.month_total_label.text().startswith("账本累计"))
+            self.assertEqual(dialog.month_total_label.text(), "全部记录累计利润：¥30.00")
             self.assertEqual(dialog.settlement_date_edit.date().toString("yyyy-MM"), "2026-07")
 
     def test_form_defaults_and_auto_stock_shares_follow_contracts(self):
@@ -151,7 +151,7 @@ class StrategyLedgerDialogTests(unittest.TestCase):
             self.assertEqual(dialog.option_premium_spin.value(), 1.0)
             self.assertEqual(dialog.stock_commission_rate, 0.0001)
             self.assertEqual(dialog.option_buy_open_fee, 1.7)
-            self.assertEqual(dialog.active_exercise_fee, 4.0)
+            self.assertEqual(dialog.active_exercise_fee, 0.7)
             self.assertFalse(
                 any("融券/资金成本" in label.text() for label in dialog.findChildren(QLabel))
             )

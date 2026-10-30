@@ -240,10 +240,10 @@ class StrategyLedgerDialog(QDialog):
         layout.setSpacing(8)
 
         summary_layout = QHBoxLayout()
-        self.month_total_label = QLabel("账本累计利润：¥0.00")
+        self.month_total_label = QLabel("全部记录累计利润：¥0.00")
         self.month_total_label.setStyleSheet(
-            "font-size:18px; font-weight:600; color:#006b5b; padding:4px 12px;"
-            "background:#eefaf7; border:1px solid #b9e3d9; border-radius:4px;"
+            "font-size:18px; font-weight:700; color:#075e54; padding:7px 14px;"
+            "background:#e9f6f2; border:1px solid #b7ded2; border-radius:6px;"
         )
         self.record_count_label = QLabel("0 条记录")
         self.record_count_label.setStyleSheet("color:#555555;")
@@ -343,11 +343,25 @@ class StrategyLedgerDialog(QDialog):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
+        self.table.setShowGrid(False)
+        self.table.setWordWrap(True)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.table.verticalHeader().setDefaultSectionSize(38)
+        self.table.horizontalHeader().setFixedHeight(34)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
-        self.table.setColumnWidth(10, 520)
-        self.table.setColumnWidth(11, 200)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setStyleSheet(
+            "QTableWidget { font-size:12px; alternate-background-color:#f4f7f8; "
+            "selection-background-color:#d6eee8; selection-color:#153d38; }"
+            "QHeaderView::section { background:#e9eff1; color:#243b43; font-weight:600; "
+            "padding:6px 4px; border:0; border-bottom:1px solid #cbd5d8; }"
+        )
+        for column, width in {
+            0: 96, 1: 182, 2: 76, 3: 128, 4: 76, 5: 92,
+            6: 78, 7: 96, 8: 122, 9: 126, 10: 460, 11: 180,
+        }.items():
+            self.table.setColumnWidth(column, width)
         self.table.itemSelectionChanged.connect(self.load_selected_record_into_form)
         layout.addWidget(self.table, stretch=1)
         self._on_mode_changed()
@@ -474,8 +488,8 @@ class StrategyLedgerDialog(QDialog):
         self.refresh_view()
 
     def refresh_view(self) -> None:
-        total = sum(float(record.get("result", 0.0)) for record in self.records)
-        self.month_total_label.setText(f"账本累计利润：¥{total:,.2f}")
+        total = sum(float(record.get("result", 0.0)) for record in self.all_records)
+        self.month_total_label.setText(f"全部记录累计利润：¥{total:,.2f}")
         self.record_count_label.setText(f"共 {len(self.records)} 条记录")
         self.table.setRowCount(len(self.records))
         for row_index, record in enumerate(self.records):
@@ -505,6 +519,14 @@ class StrategyLedgerDialog(QDialog):
                 item = QTableWidgetItem(value)
                 if column in {4, 5, 6, 7, 8, 9}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                if column == 10:
+                    item.setToolTip(str(value))
+                if column == 9:
+                    profit = float(record.get("result", 0.0))
+                    item.setForeground(Qt.GlobalColor.darkGreen if profit >= 0 else Qt.GlobalColor.darkRed)
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
                 self.table.setItem(row_index, column, item)
         self.status_label.setText("显示全部记录；账本月份仅用于录入时约束结算日期。")
 
