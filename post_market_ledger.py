@@ -34,7 +34,8 @@ DEFAULT_STOCK_PRICE = 1.0
 DEFAULT_OPTION_PREMIUM = 1.0
 DEFAULT_STOCK_COMMISSION_RATE = 0.0001
 DEFAULT_OPTION_BUY_OPEN_FEE = 1.7
-DEFAULT_ACTIVE_EXERCISE_FEE = 4.0
+DEFAULT_ACTIVE_EXERCISE_FEE = 0.7
+DEFAULT_PASSIVE_EXERCISE_FEE = 0.1
 VALID_MODES = frozenset({"mode1", "mode2", "mode3", "mode4"})
 MODE_LABELS = {
     "mode1": "模式1：买入认沽 + 买入现货",
@@ -85,7 +86,8 @@ def calculate_settled_profit(record: dict[str, Any]) -> float:
     option_premium = _number(record, "option_premium")
     commission = _number(record, "stock_commission_rate", 0.0001)
     buy_open_fee = _number(record, "option_buy_open_fee", 2.0)
-    active_exercise_fee = _number(record, "active_exercise_fee", 4.0)
+    active_exercise_fee = _number(record, "active_exercise_fee", DEFAULT_ACTIVE_EXERCISE_FEE)
+    passive_exercise_fee = _number(record, "passive_exercise_fee", DEFAULT_PASSIVE_EXERCISE_FEE)
     borrow_cost = _number(record, "borrow_cost", 0.0)
 
     if mode == "mode1":
@@ -96,9 +98,19 @@ def calculate_settled_profit(record: dict[str, Any]) -> float:
             + active_exercise_fee * contracts
         )
     elif mode == "mode2":
-        profit = stock_price * shares * (1 - commission) + option_premium * contracts - strike * shares
+        profit = (
+            stock_price * shares * (1 - commission)
+            + option_premium * contracts
+            - strike * shares
+            - passive_exercise_fee * contracts
+        )
     elif mode == "mode3":
-        profit = strike * shares + option_premium * contracts - stock_price * shares * (1 + commission)
+        profit = (
+            strike * shares
+            + option_premium * contracts
+            - stock_price * shares * (1 + commission)
+            - passive_exercise_fee * contracts
+        )
     else:
         profit = stock_price * shares * (1 - commission) - (
             strike * shares
@@ -121,7 +133,8 @@ def format_settlement_formula(record: dict[str, Any]) -> str:
     option_premium = _number(record, "option_premium")
     commission = _number(record, "stock_commission_rate", 0.0001)
     buy_open_fee = _number(record, "option_buy_open_fee", 2.0)
-    active_exercise_fee = _number(record, "active_exercise_fee", 4.0)
+    active_exercise_fee = _number(record, "active_exercise_fee", DEFAULT_ACTIVE_EXERCISE_FEE)
+    passive_exercise_fee = _number(record, "passive_exercise_fee", DEFAULT_PASSIVE_EXERCISE_FEE)
     borrow_cost = _number(record, "borrow_cost", 0.0)
     result = calculate_settled_profit(record)
 
@@ -135,12 +148,14 @@ def format_settlement_formula(record: dict[str, Any]) -> str:
     elif mode == "mode2":
         expression = (
             f"{stock_price:.4f}*{shares:.0f}*(1-{commission:.6f}) + "
-            f"{option_premium:.2f}*{contracts:.0f} - {strike:.4f}*{shares:.0f}"
+            f"{option_premium:.2f}*{contracts:.0f} - {strike:.4f}*{shares:.0f} - "
+            f"{passive_exercise_fee:.2f}*{contracts:.0f}"
         )
     elif mode == "mode3":
         expression = (
             f"{strike:.4f}*{shares:.0f} + {option_premium:.2f}*{contracts:.0f} - "
-            f"{stock_price:.4f}*{shares:.0f}*(1+{commission:.6f})"
+            f"{stock_price:.4f}*{shares:.0f}*(1+{commission:.6f}) - "
+            f"{passive_exercise_fee:.2f}*{contracts:.0f}"
         )
     else:
         expression = (
@@ -272,6 +287,7 @@ class StrategyLedgerDialog(QDialog):
         self.stock_commission_rate = DEFAULT_STOCK_COMMISSION_RATE
         self.option_buy_open_fee = DEFAULT_OPTION_BUY_OPEN_FEE
         self.active_exercise_fee = DEFAULT_ACTIVE_EXERCISE_FEE
+        self.passive_exercise_fee = DEFAULT_PASSIVE_EXERCISE_FEE
         self.legacy_borrow_cost = 0.0
         self.note_edit = QLineEdit(self)
         self.note_edit.setPlaceholderText("可选备注")
@@ -389,7 +405,8 @@ class StrategyLedgerDialog(QDialog):
         )
         if self._mode() in PASSIVE_SETTLEMENT_MODES:
             self.fee_summary_label.setText(
-                f"{base_text} 当前为被动指派模式，不计买入开仓费和主动行权费。"
+                f"{base_text} 当前为被动指派模式，计被动行权费 "
+                f"{self.passive_exercise_fee:.2f} 元/张，不计买入开仓费和主动行权费。"
             )
         else:
             self.fee_summary_label.setText(
@@ -412,17 +429,20 @@ class StrategyLedgerDialog(QDialog):
         buy_open_fee_spin.setValue(self.option_buy_open_fee)
         active_exercise_fee_spin = self._money_spin(2, 10000.0)
         active_exercise_fee_spin.setValue(self.active_exercise_fee)
+        passive_exercise_fee_spin = self._money_spin(2, 10000.0)
+        passive_exercise_fee_spin.setValue(self.passive_exercise_fee)
         fields = [
             ("现货佣金率", commission_spin),
             ("买入开仓费(元/张)", buy_open_fee_spin),
             ("主动行权费(元/张)", active_exercise_fee_spin),
+            ("被动行权费(元/张)", passive_exercise_fee_spin),
         ]
         for row, (label, widget) in enumerate(fields):
             layout.addWidget(QLabel(label, dialog), row, 0)
             layout.addWidget(widget, row, 1)
 
         if self._mode() in PASSIVE_SETTLEMENT_MODES:
-            passive_hint = QLabel("当前为被动指派模式，后两项不会计入本笔记录。", dialog)
+            passive_hint = QLabel("当前为被动指派模式，仅计被动行权费。", dialog)
             passive_hint.setStyleSheet("color:#666666;")
             layout.addWidget(passive_hint, len(fields), 0, 1, 2)
 
@@ -439,6 +459,7 @@ class StrategyLedgerDialog(QDialog):
         self.stock_commission_rate = commission_spin.value()
         self.option_buy_open_fee = buy_open_fee_spin.value()
         self.active_exercise_fee = active_exercise_fee_spin.value()
+        self.passive_exercise_fee = passive_exercise_fee_spin.value()
         self._update_fee_summary()
 
     def load_all_records(self) -> None:
@@ -511,6 +532,9 @@ class StrategyLedgerDialog(QDialog):
             "active_exercise_fee": (
                 0.0 if self._mode() in PASSIVE_SETTLEMENT_MODES else self.active_exercise_fee
             ),
+            "passive_exercise_fee": (
+                self.passive_exercise_fee if self._mode() in PASSIVE_SETTLEMENT_MODES else 0.0
+            ),
             "note": self.note_edit.text().strip(),
         }
         if self.legacy_borrow_cost:
@@ -579,6 +603,10 @@ class StrategyLedgerDialog(QDialog):
             self.active_exercise_fee = float(
                 record.get("active_exercise_fee", DEFAULT_ACTIVE_EXERCISE_FEE)
             )
+        else:
+            self.passive_exercise_fee = float(
+                record.get("passive_exercise_fee", DEFAULT_PASSIVE_EXERCISE_FEE)
+            )
         self.legacy_borrow_cost = float(record.get("borrow_cost", 0.0))
         self.note_edit.setText(str(record.get("note", "")))
         self.save_button.setText("保存修改")
@@ -596,6 +624,7 @@ class StrategyLedgerDialog(QDialog):
         self.stock_commission_rate = DEFAULT_STOCK_COMMISSION_RATE
         self.option_buy_open_fee = DEFAULT_OPTION_BUY_OPEN_FEE
         self.active_exercise_fee = DEFAULT_ACTIVE_EXERCISE_FEE
+        self.passive_exercise_fee = DEFAULT_PASSIVE_EXERCISE_FEE
         self.legacy_borrow_cost = 0.0
         self.note_edit.clear()
         self.save_button.setText("新增记录")
