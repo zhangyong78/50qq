@@ -17,6 +17,8 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+# Qt uses Windows' ICU DLL; unrelated copies on the build PATH may be incompatible.
+a.binaries = [item for item in a.binaries if item[0].lower() not in {'icuuc.dll', 'icudt78.dll'}]
 pyz = PYZ(a.pure)
 
 exe = EXE(
