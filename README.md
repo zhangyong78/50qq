@@ -28,4 +28,4 @@ Windows 下也可以运行 `run_windows.bat`。
 
 ## 打包
 
-在 Windows 上运行 `build_windows_exe.bat`，生成的主程序位于 `dist/50qqScanner/50qqScanner.exe`。打包脚本会保留已有的 `strategy_ledger.json`。
+在 Windows 上使用 Python 3.11，并在该环境中安装与 QMT 配套的 `xtquant`，然后运行 `build_windows_exe.bat`。脚本会检查 `xtquant` 是否能够导入；生成的主程序位于 `dist/50qqScanner/50qqScanner.exe`，并保留已有的 `strategy_ledger.json`。分发时请将完整目录解压到空文件夹。

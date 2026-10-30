@@ -2,10 +2,18 @@
 setlocal
 cd /d "%~dp0"
 
-where pyinstaller >nul 2>nul
+py -3.11 -c "import PyInstaller, PyQt6" >nul 2>nul
 if errorlevel 1 (
     echo Installing build dependencies...
-    python -m pip install -r requirements.txt
+    py -3.11 -m pip install -r requirements.txt
+    if errorlevel 1 exit /b 1
+)
+
+py -3.11 -c "from xtquant import xtdata" >nul 2>nul
+if errorlevel 1 (
+    echo Python 3.11 cannot import xtquant. Install the compatible QMT xtquant package before building.
+    pause
+    exit /b 1
 )
 
 set "LEDGER_FILE=dist\50qqScanner\strategy_ledger.json"
@@ -24,7 +32,7 @@ if exist "%LEDGER_FILE%" (
 )
 
 echo Building Windows GUI executable...
-pyinstaller ^
+py -3.11 -m PyInstaller ^
   --noconfirm ^
   --clean ^
   50qqScanner.spec
