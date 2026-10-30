@@ -16,6 +16,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Prefer the Qt DLLs shipped with this frozen app over copies from other apps on PATH.
+_DLL_DIRECTORY_HANDLES = []
+if getattr(sys, "frozen", False):
+    _bundled_qt_bin = Path(sys._MEIPASS) / "PyQt6" / "Qt6" / "bin"
+    if _bundled_qt_bin.is_dir():
+        os.environ["PATH"] = str(_bundled_qt_bin) + os.pathsep + os.environ.get("PATH", "")
+        _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(_bundled_qt_bin)))
+
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
