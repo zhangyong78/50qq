@@ -142,7 +142,8 @@ def default_fee_config() -> dict[str, Any]:
     return {
         "multiplier": 10000,
         "option_open_fee": 1.7,
-        "option_exercise_fee": 4.0,
+        "option_exercise_fee": 0.7,
+        "option_passive_exercise_fee": 0.1,
         "stock_commission_rate": 0.0001,
         "stock_borrow_cost": 0.0,
         "yellow_threshold": 20.0,
@@ -272,6 +273,8 @@ def load_app_config(path: Path) -> dict[str, Any]:
     merged = default_app_config()
     merged["qmt"].update(config.get("qmt", {}))
     merged["fees"].update(config.get("fees", {}))
+    if "option_passive_exercise_fee" not in config.get("fees", {}) and config.get("fees", {}).get("option_exercise_fee") == 4.0:
+        merged["fees"]["option_exercise_fee"] = 0.7
     merged["contract_pools"] = config.get("contract_pools", default_contract_pools())
     return merged
 
@@ -281,6 +284,7 @@ class FeeConfig:
     multiplier: int
     option_open_fee: float
     option_exercise_fee: float
+    option_passive_exercise_fee: float
     stock_commission_rate: float
     stock_borrow_cost: float
     yellow_threshold: float
@@ -297,6 +301,7 @@ class FeeConfig:
             multiplier=int(data["multiplier"]),
             option_open_fee=float(data["option_open_fee"]),
             option_exercise_fee=float(data["option_exercise_fee"]),
+            option_passive_exercise_fee=float(data.get("option_passive_exercise_fee", 0.1)),
             stock_commission_rate=float(data["stock_commission_rate"]),
             stock_borrow_cost=float(data["stock_borrow_cost"]),
             yellow_threshold=float(data["yellow_threshold"]),
@@ -1350,7 +1355,7 @@ def recommendation_guidance_html(rows: list[dict[str, Any]]) -> str:
 
 FORMULA_EXPLANATION_TEXT = """
 模式1 买入认沽 + 买入现货
-保底收益 = 现货买入成本按卖一 + 认沽买入成本按卖一 + 买入开仓费1.7 + 主动行权费4 之后，
+保底收益 = 现货买入成本按卖一 + 认沽买入成本按卖一 + 买入开仓费 + 主动行权费之后，
 在到期最差按K卖出现货时的保底结果。
 
 公式：
@@ -1366,7 +1371,7 @@ K×10000 - [现货卖一×10000×(1+佣金率) + 认沽卖一×10000 + 买入开
 若被行权收益 = 若到期买方最终行权，你按K被动接货时的收益。
 
 公式：
-现货买一×10000×(1-佣金率) + 认沽买一×10000 - K×10000
+现货买一×10000×(1-佣金率) + 认沽买一×10000 - K×10000 - 被动行权费
 
 模式3 卖出认购 + 持有现货
 每张收益(元) = 未被行权估算。
@@ -1378,10 +1383,10 @@ K×10000 - [现货卖一×10000×(1+佣金率) + 认沽卖一×10000 + 买入开
 若被行权收益 = 若到期买方最终行权，你按K被动交券时的收益。
 
 公式：
-K×10000 + 认购买一×10000 - 现货卖一×10000×(1+佣金率)
+K×10000 + 认购买一×10000 - 现货卖一×10000×(1+佣金率) - 被动行权费
 
 模式4 买入认购 + 卖出现货
-保底收益 = 现货卖出后，未来最差按K主动行权买回现货，再扣买入开仓费1.7和主动行权费4后的保底结果。
+保底收益 = 现货卖出后，未来最差按K主动行权买回现货，再扣买入开仓费和主动行权费后的保底结果。
 
 公式：
 现货买一×10000×(1-佣金率)
@@ -2286,6 +2291,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
         multiplier = fees.multiplier
         buy_side_option_fees = fees.option_open_fee + fees.option_exercise_fee
         active_exercise_fee = fees.option_exercise_fee
+        passive_exercise_fee = fees.option_passive_exercise_fee
         stock_commission = fees.stock_commission_rate
         strike_cash = pair.strike * multiplier
 
@@ -2325,8 +2331,8 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (put.bid1 * multiplier))
                 - ((spot.ask1 * multiplier) * (1 + stock_commission)),
                 "exercise_upper_profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (put.bid1 * multiplier))
-                - strike_cash,
-                "exercise_condition": "卖出认沽开仓不收费，被动接货也不收行权费；主收益按未被行权且按现货卖一回补恢复头寸估算，仅到期<=K且买方最终行权时才接近右侧上限",
+                - strike_cash - passive_exercise_fee,
+                "exercise_condition": "卖出认沽开仓不收费，被动接货计行权费；主收益按未被行权且按现货卖一回补恢复头寸估算，仅到期<=K且买方最终行权时才接近右侧上限",
                 "action": "现货按买一卖出，认沽按买一卖出；被动行权转入期权账户资金等待接货",
             },
             {
@@ -2343,8 +2349,8 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (call.bid1 * multiplier))
                 - ((spot.ask1 * multiplier) * (1 + stock_commission)),
                 "exercise_upper_profit": (strike_cash + (call.bid1 * multiplier))
-                - ((spot.ask1 * multiplier) * (1 + stock_commission)),
-                "exercise_condition": "卖出认购开仓不收费，被动交券也不收行权费；主收益按未被行权且按现货买一卖出落袋估算，仅到期>=K且买方最终行权时才接近右侧上限",
+                - ((spot.ask1 * multiplier) * (1 + stock_commission)) - passive_exercise_fee,
+                "exercise_condition": "卖出认购开仓不收费，被动交券计行权费；主收益按未被行权且按现货买一卖出落袋估算，仅到期>=K且买方最终行权时才接近右侧上限",
                 "action": "持有现货+卖出认购；被动行权提供现货",
             },
             {
@@ -2959,6 +2965,7 @@ class ConfigDialog(QDialog):
         self.multiplier_spin.setRange(1, 1000000)
         self.option_open_fee_spin = self._build_double_spinbox(0, 9999, 4)
         self.option_exercise_fee_spin = self._build_double_spinbox(0, 9999, 4)
+        self.option_passive_exercise_fee_spin = self._build_double_spinbox(0, 9999, 4)
         self.stock_commission_rate_spin = self._build_double_spinbox(0, 1, 6)
         self.stock_borrow_cost_spin = self._build_double_spinbox(0, 999999, 4)
         self.yellow_threshold_spin = self._build_double_spinbox(0, 999999, 2)
@@ -2974,6 +2981,7 @@ class ConfigDialog(QDialog):
         fee_form.addRow("合约乘数", self.multiplier_spin)
         fee_form.addRow("期权买入开仓费", self.option_open_fee_spin)
         fee_form.addRow("主动行权费", self.option_exercise_fee_spin)
+        fee_form.addRow("被动行权费", self.option_passive_exercise_fee_spin)
         fee_form.addRow("现货佣金率", self.stock_commission_rate_spin)
         fee_form.addRow("融券利息成本", self.stock_borrow_cost_spin)
         fee_form.addRow("黄色高亮阈值", self.yellow_threshold_spin)
@@ -3074,7 +3082,8 @@ class ConfigDialog(QDialog):
 
         self.multiplier_spin.setValue(int(fees.get("multiplier", 10000)))
         self.option_open_fee_spin.setValue(float(fees.get("option_open_fee", 1.7)))
-        self.option_exercise_fee_spin.setValue(float(fees.get("option_exercise_fee", 4.0)))
+        self.option_exercise_fee_spin.setValue(float(fees.get("option_exercise_fee", 0.7)))
+        self.option_passive_exercise_fee_spin.setValue(float(fees.get("option_passive_exercise_fee", 0.1)))
         self.stock_commission_rate_spin.setValue(float(fees.get("stock_commission_rate", 0.0001)))
         self.stock_borrow_cost_spin.setValue(float(fees.get("stock_borrow_cost", 0.0)))
         self.yellow_threshold_spin.setValue(float(fees.get("yellow_threshold", 20.0)))
@@ -3237,6 +3246,7 @@ class ConfigDialog(QDialog):
                 "multiplier": int(self.multiplier_spin.value()),
                 "option_open_fee": float(self.option_open_fee_spin.value()),
                 "option_exercise_fee": float(self.option_exercise_fee_spin.value()),
+                "option_passive_exercise_fee": float(self.option_passive_exercise_fee_spin.value()),
                 "stock_commission_rate": float(self.stock_commission_rate_spin.value()),
                 "stock_borrow_cost": float(self.stock_borrow_cost_spin.value()),
                 "yellow_threshold": float(self.yellow_threshold_spin.value()),
@@ -3880,6 +3890,7 @@ class MainWindow(QMainWindow):
         stock_commission = float(self.fees.stock_commission_rate)
         option_open_fee = float(self.fees.option_open_fee)
         option_exercise_fee = float(self.fees.option_exercise_fee)
+        option_passive_exercise_fee = float(self.fees.option_passive_exercise_fee)
         stock_borrow_cost = float(self.fees.stock_borrow_cost)
         strike = float(row.get("strike", 0.0))
         spot_bid = float(row.get("spot_bid", 0.0))
@@ -3901,6 +3912,7 @@ class MainWindow(QMainWindow):
             return (
                 f"{effective_label} = {spot_bid:.4f}×{multiplier:.0f}×(1-{stock_commission:.6f})"
                 f" + {option_bid:.4f}×{multiplier:.0f} - {strike:.4f}×{multiplier:.0f}"
+                f" - {option_passive_exercise_fee:.2f}"
                 f" = {effective_profit:.2f} 元"
             )
         if mode_key == "模式3":
@@ -3909,6 +3921,7 @@ class MainWindow(QMainWindow):
                     f"{effective_label} = {strike:.4f}×{multiplier:.0f}"
                     f" + {option_bid:.4f}×{multiplier:.0f}"
                     f" - {spot_ask:.4f}×{multiplier:.0f}×(1+{stock_commission:.6f})"
+                    f" - {option_passive_exercise_fee:.2f}"
                     f" = {effective_profit:.2f} 元"
                 )
             return (

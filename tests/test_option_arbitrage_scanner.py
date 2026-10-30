@@ -2,12 +2,14 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from PyQt6.QtWidgets import QApplication
 
 from option_arbitrage_scanner import (
     ConfigDialog,
+    FeeConfig,
     MainWindow,
     MODE_TIME_VALUE_REQUIREMENTS,
     OptionPair,
@@ -17,6 +19,8 @@ from option_arbitrage_scanner import (
     current_expiry_yyyymm,
     default_app_config,
     default_fee_config,
+    calculate_opportunities,
+    load_app_config,
     format_worker_status_message,
     ARBITRAGE_MODE_DEFS,
     FullQmtBridgeSource,
@@ -33,6 +37,30 @@ from option_arbitrage_scanner import (
 
 
 class ExpiryAndMoneynessTests(unittest.TestCase):
+    def test_exercise_fees_apply_to_the_corresponding_outcomes(self):
+        pair = OptionPair("50ETF", "spot", 3.0, "call", "put")
+        ticks = {"spot": Tick(2.99, 3.01, 3.0), "call": Tick(0.1, 0.11, 0.105), "put": Tick(0.1, 0.11, 0.105)}
+        data = default_fee_config()
+        rows = {r["mode_key"]: r for r in calculate_opportunities([pair], ticks, FeeConfig.from_dict(data))}
+        data.update(option_exercise_fee=0.0, option_passive_exercise_fee=0.0)
+        without_fees = {r["mode_key"]: r for r in calculate_opportunities([pair], ticks, FeeConfig.from_dict(data))}
+        for mode in ("模式1", "模式4"):
+            self.assertAlmostEqual(without_fees[mode]["profit"] - rows[mode]["profit"], 0.7)
+        for mode in ("模式2", "模式3"):
+            self.assertAlmostEqual(without_fees[mode]["exercise_upper_profit"] - rows[mode]["exercise_upper_profit"], 0.1)
+            self.assertEqual(without_fees[mode]["profit"], rows[mode]["profit"])
+            rows[mode]["is_in_the_money"] = True
+            formula = MainWindow._recommendation_formula_text(SimpleNamespace(fees=FeeConfig.from_dict(default_fee_config())), rows[mode])
+            self.assertIn("- 0.10", formula)
+
+    def test_legacy_fee_configuration_is_upgraded_but_custom_values_are_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"fees": {"option_exercise_fee": 4.0}}), encoding="utf-8")
+            self.assertEqual(load_app_config(path)["fees"]["option_exercise_fee"], 0.7)
+            path.write_text(json.dumps({"fees": {"option_exercise_fee": 4.0, "option_passive_exercise_fee": 0.2}}), encoding="utf-8")
+            self.assertEqual(load_app_config(path)["fees"]["option_exercise_fee"], 4.0)
+
     def test_quote_session_excludes_after_close_and_weekends(self):
         self.assertTrue(is_option_quote_session(1789524600.0))  # 2026-09-16 10:10 Shanghai
         self.assertFalse(is_option_quote_session(1789557000.0))  # 2026-09-16 19:10 Shanghai
@@ -292,6 +320,17 @@ class ConfigDialogTests(unittest.TestCase):
         dialog = ConfigDialog(default_app_config())
         self.assertEqual(dialog.quote_source_combo.count(), 2)
         self.assertEqual(dialog.quote_source_combo.currentData(), "qmt_api")
+        dialog.close()
+
+    def test_exercise_fees_can_be_configured_and_saved(self):
+        dialog = ConfigDialog(default_app_config())
+        self.assertEqual(dialog.option_exercise_fee_spin.value(), 0.7)
+        self.assertEqual(dialog.option_passive_exercise_fee_spin.value(), 0.1)
+        dialog.option_exercise_fee_spin.setValue(1.2)
+        dialog.option_passive_exercise_fee_spin.setValue(0.3)
+        fees = dialog.to_config()["fees"]
+        self.assertEqual(fees["option_exercise_fee"], 1.2)
+        self.assertEqual(fees["option_passive_exercise_fee"], 0.3)
         dialog.close()
 
 

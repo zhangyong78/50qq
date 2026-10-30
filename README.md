@@ -26,6 +26,8 @@ Windows 下也可以运行 `run_windows.bat`。
 
 模式 1、4 按主动行权费计算；模式 2、3 按被动行权费计算。对应行权费按期权张数计入结算利润和公式。模式 2、3 不计买入开仓费及主动行权费。
 
+主界面“费率与报警”也可调整主动和被动行权费。模式 2、3 仅在“若被行权收益”中扣除被动行权费，未被行权收益不扣除该费用。
+
 ## 打包
 
 在 Windows 上使用 Python 3.11，并在该环境中安装与 QMT 配套的 `xtquant`，然后运行 `build_windows_exe.bat`。脚本会检查 `xtquant` 是否能够导入；生成的主程序位于 `dist/50qqScanner/50qqScanner.exe`，并保留已有的 `strategy_ledger.json`。分发时请将完整目录解压到空文件夹。
