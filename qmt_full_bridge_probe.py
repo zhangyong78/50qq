@@ -22,7 +22,7 @@ g.output_file = r"D:\mycode\50qq\qmt_full_bridge.json"
 g.temp_file = g.output_file + ".tmp"
 g.spot_items = [
     ("50ETF", "510050.SH"),
-    ("STAR50ETF", "588000.SH"),
+    ("588000ETF", "588000.SH"),
     ("300ETF", "510300.SH"),
     ("500ETF", "510500.SH"),
     ("159915", "159915.SZ"),

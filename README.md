@@ -1,17 +1,17 @@
-# 50QQ 期权套利工具 V2026.11.25
+# 50QQ 期权套利工具 V2026.11.25.1
 
 用于监控 ETF 期权套利机会，并记录到期结算结果。主程序包含盘后策略账本，支持四种策略模式；期权合约乘数按每张 10,000 份计算。
 
 ## 运行
 
-安装 Python 依赖后，在项目目录运行：
+源码版需要 Python 3.11、项目依赖，以及与当前 QMT 配套的 `xtquant`。在已配置好这些依赖的环境中运行：
 
 ```powershell
-python -m pip install -r requirements.txt
-python option_arbitrage_scanner.py
+py -3.11 -m pip install -r requirements.txt
+py -3.11 option_arbitrage_scanner.py
 ```
 
-Windows 下也可以运行 `run_windows.bat`。
+Windows 下也可以运行 `run_windows.bat`，它会先检查 Python 3.11 能否导入 `PyQt6` 和 `xtquant`，再启动源码版。QMT 的 `userdata_mini` 路径用于连接行情服务，不会自动提供 `xtquant` Python 模块；未配置源码环境时请运行打包版 `50qqScanner.exe`。
 
 ## 结算费用
 

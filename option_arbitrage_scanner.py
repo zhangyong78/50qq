@@ -59,7 +59,7 @@ from post_market_ledger import StrategyLedgerDialog
 
 
 CONFIG_FILE = "contracts_config.json"
-APP_VERSION = "V2026.11.25"
+APP_VERSION = "V2026.11.25.1"
 APP_WINDOW_TITLE = f"A股ETF期权交割套利机会扫描器 {APP_VERSION}"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
 QMT_CONNECT_TIMEOUT_SEC = 4.0
@@ -103,7 +103,7 @@ LEDGER_PREFILL_QUOTE_FIELDS = {
     "模式4": ("mode4", "spot_bid", "option_ask"),
 }
 
-DEFAULT_UI_POOL_FILTER_NAMES = frozenset({"50ETF", "588000ETF"})
+DEFAULT_UI_POOL_FILTER_NAMES = frozenset({"588000ETF"})
 
 COMPACT_CHECKBOX_STYLE = (
     "QCheckBox { font-size:11px; spacing:3px; margin:0 2px 0 0; padding:0; }"
@@ -245,6 +245,11 @@ def default_app_config() -> dict[str, Any]:
         },
         "fees": default_fee_config(),
         "contract_pools": default_contract_pools(),
+        "display": {
+            "visible_mode_columns": [index for index in range(23) if index != 6],
+            "simplified_mode_display": False,
+            "mode_table_columns_version": 3,
+        },
     }
 
 
@@ -276,6 +281,39 @@ def load_app_config(path: Path) -> dict[str, Any]:
     if "option_passive_exercise_fee" not in config.get("fees", {}) and config.get("fees", {}).get("option_exercise_fee") == 4.0:
         merged["fees"]["option_exercise_fee"] = 0.7
     merged["contract_pools"] = config.get("contract_pools", default_contract_pools())
+    saved_display = config.get("display", {})
+    if isinstance(saved_display, dict):
+        visible_columns = saved_display.get("visible_mode_columns")
+        display_version = int(saved_display.get("mode_table_columns_version", 1))
+        if display_version < 2 and isinstance(visible_columns, list):
+            old_to_new = {
+                0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8,
+                9: 11, 10: 9, 11: 15, 12: 13, 13: 17, 14: 18,
+                15: 19, 16: 20, 17: 21, 18: 22,
+            }
+            old_visible = {int(index) for index in visible_columns if str(index).isdigit()}
+            migrated = {new for old, new in old_to_new.items() if old in old_visible}
+            migrated.update(
+                new
+                for old_price, new_volume in ((10, 10), (9, 12), (12, 14), (11, 16))
+                if old_price in old_visible
+                for new in (new_volume,)
+            )
+            saved_display = dict(saved_display)
+            saved_display["visible_mode_columns"] = sorted(migrated)
+            display_version = 2
+        visible_columns = saved_display.get("visible_mode_columns")
+        if display_version < 3 and isinstance(visible_columns, list):
+            v2_to_v3 = {index: index for index in range(23)}
+            v2_to_v3.update({9: 10, 10: 9, 13: 14, 14: 13})
+            saved_display = dict(saved_display)
+            saved_display["visible_mode_columns"] = sorted(
+                v2_to_v3[int(index)]
+                for index in visible_columns
+                if str(index).isdigit() and int(index) in v2_to_v3
+            )
+        merged["display"].update(saved_display)
+    merged["display"]["mode_table_columns_version"] = 3
     return merged
 
 
@@ -393,6 +431,8 @@ class Tick:
     bid1: float
     ask1: float
     last: float
+    bid_vol1: float = 0.0
+    ask_vol1: float = 0.0
 
 
 def ticks_with_last_price_estimates(
@@ -414,6 +454,11 @@ def ticks_with_last_price_estimates(
 def first_number(value: Any) -> float:
     if value is None:
         return 0.0
+    if hasattr(value, "tolist"):
+        try:
+            value = value.tolist()
+        except Exception:
+            return 0.0
     if isinstance(value, (list, tuple)):
         if not value:
             return 0.0
@@ -455,7 +500,21 @@ def normalize_tick(raw: Any) -> Tick | None:
         ask = last
     if bid <= 0 or ask <= 0:
         return None
-    return Tick(bid1=bid, ask1=ask, last=last)
+    bid_volume = pick_number(
+        raw,
+        ["bidVol", "bid_vol", "bidVolume", "bid_volume", "bidVol1", "bidVolume1", "BidVol1"],
+    )
+    ask_volume = pick_number(
+        raw,
+        ["askVol", "ask_vol", "askVolume", "ask_volume", "askVol1", "askVolume1", "AskVol1"],
+    )
+    return Tick(
+        bid1=bid,
+        ask1=ask,
+        last=last,
+        bid_vol1=bid_volume,
+        ask_vol1=ask_volume,
+    )
 
 
 def build_option_pairs(contract_pools: list[dict[str, Any]], *, auto_atm: bool) -> list[OptionPair]:
@@ -953,9 +1012,15 @@ def is_qmt_port_listening(port: int, timeout: float = QMT_PORT_PROBE_TIMEOUT_SEC
 
 
 def format_qmt_connect_error(exc: Exception) -> str:
-    if isinstance(exc, ImportError) or "No module named 'xtquant'" in str(exc):
-        return "未安装 xtquant，请使用 QMT 自带 Python 环境运行本程序。"
     message = str(exc or "").strip()
+    if "No module named 'xtquant'" in message:
+        python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        return (
+            f"当前 Python {python_version} 环境未安装 xtquant。"
+            "源码版请用已安装 QMT xtquant 的 Python 3.11 环境启动，或运行打包版程序。"
+        )
+    if isinstance(exc, ImportError):
+        return f"xtquant 导入失败：{message}。请检查 Python 版本兼容性及依赖 DLL。"
     if message:
         return message
     return "QMT 行情连接失败，请检查客户端是否已登录。"
@@ -2309,7 +2374,9 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "profit_type": "保底收益",
                 "alert_eligible": True,
                 "option_bid": put.bid1,
+                "option_bid_vol": put.bid_vol1,
                 "option_ask": put.ask1,
+                "option_ask_vol": put.ask_vol1,
                 "option_mid": put_mid,
                 "profit": strike_cash
                 - ((spot.ask1 * multiplier) * (1 + stock_commission) + (put.ask1 * multiplier) + buy_side_option_fees),
@@ -2326,7 +2393,9 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "profit_type": "条件结构",
                 "alert_eligible": False,
                 "option_bid": put.bid1,
+                "option_bid_vol": put.bid_vol1,
                 "option_ask": put.ask1,
+                "option_ask_vol": put.ask_vol1,
                 "option_mid": put_mid,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (put.bid1 * multiplier))
                 - ((spot.ask1 * multiplier) * (1 + stock_commission)),
@@ -2344,7 +2413,9 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "profit_type": "条件结构",
                 "alert_eligible": False,
                 "option_bid": call.bid1,
+                "option_bid_vol": call.bid_vol1,
                 "option_ask": call.ask1,
+                "option_ask_vol": call.ask_vol1,
                 "option_mid": call_mid,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (call.bid1 * multiplier))
                 - ((spot.ask1 * multiplier) * (1 + stock_commission)),
@@ -2362,7 +2433,9 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "profit_type": "保底收益",
                 "alert_eligible": True,
                 "option_bid": call.bid1,
+                "option_bid_vol": call.bid_vol1,
                 "option_ask": call.ask1,
+                "option_ask_vol": call.ask_vol1,
                 "option_mid": call_mid,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission))
                 - (strike_cash + (call.ask1 * multiplier) + fees.option_open_fee + active_exercise_fee + fees.stock_borrow_cost),
@@ -2414,9 +2487,13 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                     "exercise_status": exercise_status,
                     "exercise_upper_profit": item.get("exercise_upper_profit"),
                     "spot_bid": spot.bid1,
+                    "spot_bid_vol": spot.bid_vol1,
                     "spot_ask": spot.ask1,
+                    "spot_ask_vol": spot.ask_vol1,
                     "option_bid": item["option_bid"],
+                    "option_bid_vol": item["option_bid_vol"],
                     "option_ask": item["option_ask"],
+                    "option_ask_vol": item["option_ask_vol"],
                     "intrinsic_value": intrinsic,
                     "time_value": time_value,
                     "expiry": pair.expiry,
@@ -3269,6 +3346,32 @@ class ConfigDialog(QDialog):
         super().accept()
 
 
+class ModeColumnDialog(QDialog):
+    def __init__(self, visible_columns: set[int], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("模式表列设置")
+        self.resize(340, 520)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("勾选要在四个模式表中显示的列：", self))
+        self.column_checks: list[QCheckBox] = []
+        for index, header in enumerate(MainWindow.MODE_TABLE_HEADERS):
+            check = QCheckBox(header, self)
+            check.setChecked(index in visible_columns)
+            self.column_checks.append(check)
+            layout.addWidget(check)
+        layout.addStretch(1)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_columns(self) -> set[int]:
+        return {index for index, check in enumerate(self.column_checks) if check.isChecked()}
+
+
 class MainWindow(QMainWindow):
     MODE_TABLE_HEADERS = [
         "品种",
@@ -3280,10 +3383,14 @@ class MainWindow(QMainWindow):
         "收益类型",
         "当前状态",
         "当前行权判断",
-        "现货买一",
+        "现货卖一量",
         "现货卖一",
-        "期权买一",
+        "现货买一",
+        "现货买一量",
+        "期权卖一量",
         "期权卖一",
+        "期权买一",
+        "期权买一量",
         "内在价值",
         "时间价值",
         "到期日",
@@ -3291,25 +3398,33 @@ class MainWindow(QMainWindow):
         "实现条件",
         "操作参考盘口说明",
     ]
-    _NUMERIC_TABLE_COLUMNS = {2, 4, 5, 9, 10, 11, 12, 13, 14}
+    _NUMERIC_TABLE_COLUMNS = {2, 4, 5} | set(range(9, 19))
     _PROFIT_COLUMN = 4
     _UPPER_PROFIT_COLUMN = 5
     _EXERCISE_STATUS_COLUMN = 8
-    _TIME_VALUE_COLUMN = 14
+    _TIME_VALUE_COLUMN = 18
     _QUOTE_COLUMN_GROUP_STYLES = {
-        9: ("#dbeafe", "#eff6ff", "#0c4a6e"),
         10: ("#dbeafe", "#eff6ff", "#0c4a6e"),
-        11: ("#ede9fe", "#f5f3ff", "#5b21b6"),
-        12: ("#ede9fe", "#f5f3ff", "#5b21b6"),
-        13: ("#fef3c7", "#fffbeb", "#92400e"),
-        14: ("#fef3c7", "#fffbeb", "#92400e"),
+        11: ("#dbeafe", "#eff6ff", "#0c4a6e"),
+        14: ("#ede9fe", "#f5f3ff", "#5b21b6"),
+        15: ("#ede9fe", "#f5f3ff", "#5b21b6"),
+        17: ("#fef3c7", "#fffbeb", "#92400e"),
+        18: ("#fef3c7", "#fffbeb", "#92400e"),
     }
+    _VOLUME_TABLE_COLUMNS = {9, 12, 13, 16}
 
     def __init__(self, config_path: Path) -> None:
         super().__init__()
         self.config_path = config_path
         self.config = load_app_config(config_path)
         self.fees = FeeConfig.from_dict(self.config["fees"])
+        display_config = self.config.get("display", {})
+        self.visible_mode_columns = {
+            int(index)
+            for index in display_config.get("visible_mode_columns", range(len(self.MODE_TABLE_HEADERS)))
+            if str(index).isdigit() and 0 <= int(index) < len(self.MODE_TABLE_HEADERS)
+        }
+        self.simplified_mode_display = bool(display_config.get("simplified_mode_display", False))
         self.is_frozen = False
         self._live_render_paused = False
         self.latest_rows: list[dict[str, Any]] = []
@@ -3353,12 +3468,24 @@ class MainWindow(QMainWindow):
         self.reload_button.clicked.connect(self.reload_config)
         self.freeze_button = QPushButton("锁定")
         self.freeze_button.clicked.connect(self.toggle_freeze)
+        self.column_settings_button = QPushButton("列设置")
+        self.column_settings_button.clicked.connect(self.open_mode_column_settings)
+        self.simplified_display_button = QPushButton("简化显示")
+        self.simplified_display_button.setCheckable(True)
+        self.simplified_display_button.setChecked(self.simplified_mode_display)
+        self.simplified_display_button.setText(
+            "简化显示 ✓" if self.simplified_mode_display else "简化显示"
+        )
+        self.simplified_display_button.setToolTip("切换时隐藏或恢复“实现条件”和“操作参考盘口说明”列")
+        self.simplified_display_button.toggled.connect(self.on_simplified_display_toggled)
         for button in (
             self.config_button,
             self.formula_button,
             self.post_market_button,
             self.reload_button,
             self.freeze_button,
+            self.column_settings_button,
+            self.simplified_display_button,
         ):
             button.setFixedHeight(24)
             button.setStyleSheet("font-size:11px; padding:0 8px;")
@@ -3368,6 +3495,8 @@ class MainWindow(QMainWindow):
         toolbar.addWidget(self.post_market_button)
         toolbar.addWidget(self.reload_button)
         toolbar.addWidget(self.freeze_button)
+        toolbar.addWidget(self.column_settings_button)
+        toolbar.addWidget(self.simplified_display_button)
 
         market_caption = QLabel("现货行情")
         market_caption.setStyleSheet("font-weight: 600; color: #333333; font-size: 11px;")
@@ -3494,7 +3623,7 @@ class MainWindow(QMainWindow):
             self.tier_filter_layout.addWidget(checkbox)
         self.hide_adjusted_checkbox = QCheckBox("隐藏 A 合约", self)
         self.hide_adjusted_checkbox.setStyleSheet(COMPACT_CHECKBOX_STYLE)
-        self.hide_adjusted_checkbox.setChecked(True)
+        self.hide_adjusted_checkbox.setChecked(False)
         self.hide_adjusted_checkbox.setToolTip(
             "隐藏交易所调整过的期权合约（合约名称含「调整」或行权价后缀 A，如 5604A）"
         )
@@ -3551,6 +3680,7 @@ class MainWindow(QMainWindow):
 
             self.mode_tables[mode_key] = table
             self.mode_boxes[mode_key] = box
+            self._apply_mode_column_visibility(table, mode_key)
             mode_grid.addWidget(box, row, column)
 
         layout.addLayout(mode_grid, stretch=1)
@@ -3575,6 +3705,42 @@ class MainWindow(QMainWindow):
         if mode_key in {"模式1", "模式4"}:
             headers[4] = "主动行权后每张收益(元)"
         return headers
+
+    def _apply_mode_column_visibility(self, table: QTableWidget, mode_key: str) -> None:
+        for column in range(table.columnCount()):
+            hidden_for_simple_view = self.simplified_mode_display and column in {21, 22}
+            hidden_for_mode = (
+                mode_key in {"模式1", "模式4"}
+                and column == self._UPPER_PROFIT_COLUMN
+            )
+            table.setColumnHidden(
+                column,
+                hidden_for_simple_view or hidden_for_mode or column not in self.visible_mode_columns,
+            )
+
+    def _save_display_preferences(self) -> None:
+        self.config["display"] = {
+            "visible_mode_columns": sorted(self.visible_mode_columns),
+            "simplified_mode_display": self.simplified_mode_display,
+            "mode_table_columns_version": 3,
+        }
+        save_app_config(self.config_path, self.config)
+
+    def open_mode_column_settings(self) -> None:
+        dialog = ModeColumnDialog(self.visible_mode_columns, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.visible_mode_columns = dialog.selected_columns()
+        for mode_key, table in self.mode_tables.items():
+            self._apply_mode_column_visibility(table, mode_key)
+        self._save_display_preferences()
+
+    def on_simplified_display_toggled(self, enabled: bool) -> None:
+        self.simplified_mode_display = enabled
+        self.simplified_display_button.setText("简化显示 ✓" if enabled else "简化显示")
+        for mode_key, table in self.mode_tables.items():
+            self._apply_mode_column_visibility(table, mode_key)
+        self._save_display_preferences()
 
     def _configured_pool_names(self) -> list[str]:
         names: list[str] = []
@@ -4005,12 +4171,21 @@ class MainWindow(QMainWindow):
                     else "-"
                 ),
                 row.get("profit_type", ""),
-                row.get("moneyness_text", ""),
+                (
+                    "无价值（虚值）"
+                    if not bool(row.get("is_in_the_money"))
+                    and row.get("moneyness_text") != "行权价接近现价"
+                    else row.get("moneyness_text", "")
+                ),
                 row.get("exercise_status", ""),
-                f"{row['spot_bid']:.4f}",
+                self._format_order_volume(row.get("spot_ask_vol", 0.0)),
                 f"{row['spot_ask']:.4f}",
-                f"{row['option_bid']:.4f}",
+                f"{row['spot_bid']:.4f}",
+                self._format_order_volume(row.get("spot_bid_vol", 0.0)),
+                self._format_order_volume(row.get("option_ask_vol", 0.0)),
                 f"{row['option_ask']:.4f}",
+                f"{row['option_bid']:.4f}",
+                self._format_order_volume(row.get("option_bid_vol", 0.0)),
                 f"{float(row['intrinsic_value']):.4f}",
                 f"{float(row['time_value']):.4f}",
                 row["expiry"],
@@ -4025,6 +4200,8 @@ class MainWindow(QMainWindow):
                 self._apply_quote_column_group_style(item, column)
                 if column == self._PROFIT_COLUMN:
                     self._apply_profit_color(item, float(row["profit"]), bool(row.get("alert_eligible")))
+                if column == 3 and int(row.get("atm_tier", 0)) == 0:
+                    self._apply_atm_tier_style(item)
                 if column == self._UPPER_PROFIT_COLUMN:
                     self._apply_upper_profit_color(
                         item,
@@ -4042,12 +4219,33 @@ class MainWindow(QMainWindow):
                 if column == 6:
                     self._apply_profit_type_style(item, bool(row.get("alert_eligible")))
                 if column == 7:
-                    self._apply_moneyness_style(item, str(row.get("moneyness_text", "")))
+                    moneyness_text = str(row.get("moneyness_text", ""))
+                    if (
+                        not bool(row.get("is_in_the_money"))
+                        and moneyness_text != "行权价接近现价"
+                    ):
+                        item.setToolTip("当前为虚值期权，没有内在/行权价值；仍可能包含时间价值。")
+                        item.setForeground(QColor("#667085"))
+                    else:
+                        self._apply_moneyness_style(item, moneyness_text)
                 if column == self._EXERCISE_STATUS_COLUMN:
                     self._apply_exercise_status_alert(item, str(row.get("exercise_status", "")))
                 table.setItem(row_index, column, item)
         table.resizeColumnsToContents()
         table.setSortingEnabled(True)
+
+    @staticmethod
+    def _format_order_volume(value: Any) -> str:
+        volume = first_number(value)
+        return f"{volume:,.0f}" if volume > 0 else "—"
+
+    @staticmethod
+    def _apply_atm_tier_style(item: QTableWidgetItem) -> None:
+        item.setBackground(QColor("#ccfbf1"))
+        item.setForeground(QColor("#0f766e"))
+        font = item.font()
+        font.setBold(True)
+        item.setFont(font)
 
     @classmethod
     def _apply_quote_column_group_style(
@@ -4057,6 +4255,10 @@ class MainWindow(QMainWindow):
         *,
         is_header: bool = False,
     ) -> None:
+        if column in cls._VOLUME_TABLE_COLUMNS:
+            item.setBackground(QColor("#f3f4f6"))
+            item.setForeground(QColor("#596273"))
+            return
         style = cls._QUOTE_COLUMN_GROUP_STYLES.get(column)
         if style is None:
             return
@@ -4222,6 +4424,7 @@ class MainWindow(QMainWindow):
             return
         try:
             config = dialog.to_config()
+            config["display"] = self.config.get("display", default_app_config()["display"])
             save_app_config(self.config_path, config)
         except ValueError as exc:
             self.config_dialog = None
@@ -4249,6 +4452,21 @@ class MainWindow(QMainWindow):
 
         self.config = load_app_config(self.config_path)
         self.fees = FeeConfig.from_dict(self.config["fees"])
+        display_config = self.config.get("display", {})
+        self.visible_mode_columns = {
+            int(index)
+            for index in display_config.get("visible_mode_columns", range(len(self.MODE_TABLE_HEADERS)))
+            if str(index).isdigit() and 0 <= int(index) < len(self.MODE_TABLE_HEADERS)
+        }
+        self.simplified_mode_display = bool(display_config.get("simplified_mode_display", False))
+        self.simplified_display_button.blockSignals(True)
+        self.simplified_display_button.setChecked(self.simplified_mode_display)
+        self.simplified_display_button.setText(
+            "简化显示 ✓" if self.simplified_mode_display else "简化显示"
+        )
+        self.simplified_display_button.blockSignals(False)
+        for mode_key, table in self.mode_tables.items():
+            self._apply_mode_column_visibility(table, mode_key)
         self._rebuild_pool_filter_widgets()
         self.sound_checkbox.blockSignals(True)
         self.sound_checkbox.setChecked(self.fees.sound_enabled)
