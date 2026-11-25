@@ -218,6 +218,7 @@ class StrategyLedgerDialog(QDialog):
         "现货成交价",
         "期权权利金(元/张)",
         "已结算利润(元)",
+        "每张利润(元)",
         "结算公式",
         "备注",
     ]
@@ -359,7 +360,7 @@ class StrategyLedgerDialog(QDialog):
         )
         for column, width in {
             0: 96, 1: 182, 2: 76, 3: 128, 4: 76, 5: 92,
-            6: 78, 7: 96, 8: 122, 9: 126, 10: 460, 11: 180,
+            6: 78, 7: 96, 8: 122, 9: 126, 10: 112, 11: 460, 12: 180,
         }.items():
             self.table.setColumnWidth(column, width)
         self.table.itemSelectionChanged.connect(self.load_selected_record_into_form)
@@ -512,16 +513,21 @@ class StrategyLedgerDialog(QDialog):
                     else f"{float(record.get('option_premium', 0.0)):.2f}"
                 ),
                 f"{float(record.get('result', 0.0)):.2f}",
+                (
+                    f"{float(record.get('result', 0.0)) / float(record.get('option_contracts', 0)):.2f}"
+                    if float(record.get("option_contracts", 0) or 0) > 0
+                    else "—"
+                ),
                 record.get("formula", ""),
                 record.get("note", ""),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if column in {4, 5, 6, 7, 8, 9}:
+                if column in {4, 5, 6, 7, 8, 9, 10}:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if column == 10:
+                if column == 11:
                     item.setToolTip(str(value))
-                if column == 9:
+                if column in {9, 10}:
                     profit = float(record.get("result", 0.0))
                     item.setForeground(Qt.GlobalColor.darkGreen if profit >= 0 else Qt.GlobalColor.darkRed)
                     font = item.font()

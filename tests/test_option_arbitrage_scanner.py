@@ -171,6 +171,10 @@ class ExpiryAndMoneynessTests(unittest.TestCase):
 
     def test_profit_column_explicitly_states_unexercised_assumption(self):
         self.assertEqual(MainWindow.MODE_TABLE_HEADERS[4], "未被行权每张收益(元)")
+        for mode in ("模式1", "模式4"):
+            self.assertEqual(MainWindow._mode_table_headers(mode)[4], "主动行权后每张收益(元)")
+        for mode in ("模式2", "模式3"):
+            self.assertEqual(MainWindow._mode_table_headers(mode)[4], "未被行权每张收益(元)")
 
     def test_exercise_status_column_follows_current_status_column(self):
         self.assertEqual(MainWindow.MODE_TABLE_HEADERS[7], "当前状态")

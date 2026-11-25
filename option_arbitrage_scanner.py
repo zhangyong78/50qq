@@ -59,7 +59,7 @@ from post_market_ledger import StrategyLedgerDialog
 
 
 CONFIG_FILE = "contracts_config.json"
-APP_VERSION = "V123"
+APP_VERSION = "V2026.11.25"
 APP_WINDOW_TITLE = f"A股ETF期权交割套利机会扫描器 {APP_VERSION}"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
 QMT_CONNECT_TIMEOUT_SEC = 4.0
@@ -3534,8 +3534,9 @@ class MainWindow(QMainWindow):
             )
             box_layout.addWidget(time_value_requirement)
 
-            table = QTableWidget(0, len(self.MODE_TABLE_HEADERS), box)
-            table.setHorizontalHeaderLabels(self.MODE_TABLE_HEADERS)
+            headers = self._mode_table_headers(mode_key)
+            table = QTableWidget(0, len(headers), box)
+            table.setHorizontalHeaderLabels(headers)
             for header_column in range(len(self.MODE_TABLE_HEADERS)):
                 header_item = table.horizontalHeaderItem(header_column)
                 if header_item is not None:
@@ -3567,6 +3568,13 @@ class MainWindow(QMainWindow):
         box = self.mode_boxes.get(mode_key)
         if base_title and box is not None:
             box.setTitle(f"{base_title} · {count}条")
+
+    @classmethod
+    def _mode_table_headers(cls, mode_key: str) -> list[str]:
+        headers = list(cls.MODE_TABLE_HEADERS)
+        if mode_key in {"模式1", "模式4"}:
+            headers[4] = "主动行权后每张收益(元)"
+        return headers
 
     def _configured_pool_names(self) -> list[str]:
         names: list[str] = []
