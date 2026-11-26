@@ -104,7 +104,7 @@
       3,
       4,
       5,
-      7,
+      6,
       8,
       9,
       10,
@@ -119,9 +119,10 @@
       19,
       20,
       21,
-      22
+      22,
+      23
     ],
     "simplified_mode_display": true,
-    "mode_table_columns_version": 3
+    "mode_table_columns_version": 4
   }
 }

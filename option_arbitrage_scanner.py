@@ -59,7 +59,7 @@ from post_market_ledger import StrategyLedgerDialog
 
 
 CONFIG_FILE = "contracts_config.json"
-APP_VERSION = "V2026.11.25.1"
+APP_VERSION = "V2026.11.26"
 APP_WINDOW_TITLE = f"A股ETF期权交割套利机会扫描器 {APP_VERSION}"
 QMT_PORT_PROBE_TIMEOUT_SEC = 0.35
 QMT_CONNECT_TIMEOUT_SEC = 4.0
@@ -246,9 +246,9 @@ def default_app_config() -> dict[str, Any]:
         "fees": default_fee_config(),
         "contract_pools": default_contract_pools(),
         "display": {
-            "visible_mode_columns": [index for index in range(23) if index != 6],
+            "visible_mode_columns": [index for index in range(24) if index != 7],
             "simplified_mode_display": False,
-            "mode_table_columns_version": 3,
+            "mode_table_columns_version": 4,
         },
     }
 
@@ -312,8 +312,16 @@ def load_app_config(path: Path) -> dict[str, Any]:
                 for index in visible_columns
                 if str(index).isdigit() and int(index) in v2_to_v3
             )
+            display_version = 3
+        visible_columns = saved_display.get("visible_mode_columns")
+        if display_version < 4 and isinstance(visible_columns, list):
+            saved_display = dict(saved_display)
+            saved_display["visible_mode_columns"] = sorted(
+                {int(index) if int(index) < 3 else int(index) + 1 for index in visible_columns if str(index).isdigit()}
+                | {3}
+            )
         merged["display"].update(saved_display)
-    merged["display"]["mode_table_columns_version"] = 3
+    merged["display"]["mode_table_columns_version"] = 4
     return merged
 
 
@@ -2378,6 +2386,8 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "option_ask": put.ask1,
                 "option_ask_vol": put.ask_vol1,
                 "option_mid": put_mid,
+                "synthetic_price": spot.ask1 * (1 + stock_commission)
+                + put.ask1 + buy_side_option_fees / multiplier,
                 "profit": strike_cash
                 - ((spot.ask1 * multiplier) * (1 + stock_commission) + (put.ask1 * multiplier) + buy_side_option_fees),
                 "exercise_upper_profit": None,
@@ -2397,6 +2407,8 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "option_ask": put.ask1,
                 "option_ask_vol": put.ask_vol1,
                 "option_mid": put_mid,
+                "synthetic_price": spot.bid1 * (1 - stock_commission)
+                + put.bid1 - passive_exercise_fee / multiplier,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (put.bid1 * multiplier))
                 - ((spot.ask1 * multiplier) * (1 + stock_commission)),
                 "exercise_upper_profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (put.bid1 * multiplier))
@@ -2417,6 +2429,8 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "option_ask": call.ask1,
                 "option_ask_vol": call.ask_vol1,
                 "option_mid": call_mid,
+                "synthetic_price": spot.ask1 * (1 + stock_commission)
+                - call.bid1 + passive_exercise_fee / multiplier,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission) + (call.bid1 * multiplier))
                 - ((spot.ask1 * multiplier) * (1 + stock_commission)),
                 "exercise_upper_profit": (strike_cash + (call.bid1 * multiplier))
@@ -2437,6 +2451,9 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                 "option_ask": call.ask1,
                 "option_ask_vol": call.ask_vol1,
                 "option_mid": call_mid,
+                "synthetic_price": spot.bid1 * (1 - stock_commission)
+                - call.ask1
+                - (fees.option_open_fee + active_exercise_fee + fees.stock_borrow_cost) / multiplier,
                 "profit": ((spot.bid1 * multiplier) * (1 - stock_commission))
                 - (strike_cash + (call.ask1 * multiplier) + fees.option_open_fee + active_exercise_fee + fees.stock_borrow_cost),
                 "exercise_upper_profit": None,
@@ -2475,6 +2492,7 @@ def calculate_opportunities(pairs: list[OptionPair], ticks: dict[str, Tick], fee
                     "option_code": item["option_code"],
                     "spot_code": pair.spot_code,
                     "strike": pair.strike,
+                    "synthetic_price": float(item["synthetic_price"]),
                     "atm_tier": pair.atm_tier,
                     "tier_label": format_atm_tier_label(pair.atm_tier),
                     "ref_atm_strike": pair.ref_atm_strike,
@@ -3377,6 +3395,7 @@ class MainWindow(QMainWindow):
         "品种",
         "期权代码",
         "行权价",
+        "合成价格",
         "档位",
         "未被行权每张收益(元)",
         "若被行权上限",
@@ -3398,20 +3417,20 @@ class MainWindow(QMainWindow):
         "实现条件",
         "操作参考盘口说明",
     ]
-    _NUMERIC_TABLE_COLUMNS = {2, 4, 5} | set(range(9, 19))
-    _PROFIT_COLUMN = 4
-    _UPPER_PROFIT_COLUMN = 5
-    _EXERCISE_STATUS_COLUMN = 8
-    _TIME_VALUE_COLUMN = 18
+    _NUMERIC_TABLE_COLUMNS = {2, 3, 5, 6} | set(range(10, 20))
+    _PROFIT_COLUMN = 5
+    _UPPER_PROFIT_COLUMN = 6
+    _EXERCISE_STATUS_COLUMN = 9
+    _TIME_VALUE_COLUMN = 19
     _QUOTE_COLUMN_GROUP_STYLES = {
-        10: ("#dbeafe", "#eff6ff", "#0c4a6e"),
         11: ("#dbeafe", "#eff6ff", "#0c4a6e"),
-        14: ("#ede9fe", "#f5f3ff", "#5b21b6"),
+        12: ("#dbeafe", "#eff6ff", "#0c4a6e"),
         15: ("#ede9fe", "#f5f3ff", "#5b21b6"),
-        17: ("#fef3c7", "#fffbeb", "#92400e"),
+        16: ("#ede9fe", "#f5f3ff", "#5b21b6"),
         18: ("#fef3c7", "#fffbeb", "#92400e"),
+        19: ("#fef3c7", "#fffbeb", "#92400e"),
     }
-    _VOLUME_TABLE_COLUMNS = {9, 12, 13, 16}
+    _VOLUME_TABLE_COLUMNS = {10, 13, 14, 17}
 
     def __init__(self, config_path: Path) -> None:
         super().__init__()
@@ -3670,6 +3689,15 @@ class MainWindow(QMainWindow):
                 header_item = table.horizontalHeaderItem(header_column)
                 if header_item is not None:
                     self._apply_quote_column_group_style(header_item, header_column, is_header=True)
+                    if header_column == 3:
+                        header_item.setBackground(QColor("#fee2e2"))
+                        header_item.setForeground(QColor("#b91c1c"))
+                        header_item.setToolTip(
+                            "费用折算后的每份 ETF 合成价格；模式1/3低于行权价较有利，模式2/4高于较有利。"
+                        )
+                        header_font = header_item.font()
+                        header_font.setBold(True)
+                        header_item.setFont(header_font)
             table.setAlternatingRowColors(True)
             table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
             table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -3708,7 +3736,7 @@ class MainWindow(QMainWindow):
 
     def _apply_mode_column_visibility(self, table: QTableWidget, mode_key: str) -> None:
         for column in range(table.columnCount()):
-            hidden_for_simple_view = self.simplified_mode_display and column in {21, 22}
+            hidden_for_simple_view = self.simplified_mode_display and column in {22, 23}
             hidden_for_mode = (
                 mode_key in {"模式1", "模式4"}
                 and column == self._UPPER_PROFIT_COLUMN
@@ -3722,7 +3750,7 @@ class MainWindow(QMainWindow):
         self.config["display"] = {
             "visible_mode_columns": sorted(self.visible_mode_columns),
             "simplified_mode_display": self.simplified_mode_display,
-            "mode_table_columns_version": 3,
+            "mode_table_columns_version": 4,
         }
         save_app_config(self.config_path, self.config)
 
@@ -4163,6 +4191,7 @@ class MainWindow(QMainWindow):
                 row["pool"],
                 row["option_code"],
                 format_strike_display(float(row["strike"]), str(row.get("spot_code", ""))),
+                f"{float(row['synthetic_price']):.4f}",
                 str(row.get("tier_label") or format_atm_tier_label(int(row.get("atm_tier", 0)))),
                 f"{row['profit']:.2f}",
                 (
@@ -4200,7 +4229,7 @@ class MainWindow(QMainWindow):
                 self._apply_quote_column_group_style(item, column)
                 if column == self._PROFIT_COLUMN:
                     self._apply_profit_color(item, float(row["profit"]), bool(row.get("alert_eligible")))
-                if column == 3 and int(row.get("atm_tier", 0)) == 0:
+                if column == 4 and int(row.get("atm_tier", 0)) == 0:
                     self._apply_atm_tier_style(item)
                 if column == self._UPPER_PROFIT_COLUMN:
                     self._apply_upper_profit_color(
@@ -4216,9 +4245,9 @@ class MainWindow(QMainWindow):
                     font = item.font()
                     font.setBold(True)
                     item.setFont(font)
-                if column == 6:
-                    self._apply_profit_type_style(item, bool(row.get("alert_eligible")))
                 if column == 7:
+                    self._apply_profit_type_style(item, bool(row.get("alert_eligible")))
+                if column == 8:
                     moneyness_text = str(row.get("moneyness_text", ""))
                     if (
                         not bool(row.get("is_in_the_money"))
